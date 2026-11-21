@@ -247,7 +247,9 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
   - dois testes no simulador cobrem os dois casos.
 - [fato] No mesmo teste, um `select 11` (carregar o "SAVE TEST") recebeu status 1 e nunca a conclusão. Os canais fecharam sem resposta de FIN, e as conexões seguintes falharam com "transfer was cancelled" e depois "endpoint stalled". **Só desligar e religar a fonte do aparelho resolveu**, como o tonepush documenta. Causa desconhecida; o aparelho vinha de um processo morto no meio de uma sessão.
 - [fato] A configuração 113 **não** mudou depois de salvar o "Empty" sem mudanças, nem depois de subir o "SAVE TEST" (cópia do 010) para o slot atual. Mudou de int `0` para float `1.0` logo depois de subir o "Empty" para o slot atual, quando o aparelho o recarregou.
-- [hipótese] Carregar um preset que define um modelo de Variax (seção 5, chave 45: `15` no "Empty", `0` nos AC30) faz o firmware stock aplicar os níveis de corda do Variax do preset (padrão `1.0`) nos registros 111–116, sobrescrevendo os containers do HXtra (`tap_color` 111, `usb_monitor` 112, `preset_color` 113). Só a 113 aparece diferente porque é a única com valor do usuário. Teste proposto: carregar um "Empty" e um AC30 e comparar a 113. Se confirmar, vira relatório para o HXtra.
+- [hipótese refutada] "Carregar um preset com modelo de Variax (seção 5, chave 45 = `15` nos 115 "Empty", `0` nos 11 AC30) regrava a 113": com a 113 restaurada como int `0`, `select 12` ("Empty") e depois `select 0` (AC30) não a mudaram.
+- [fato] Nas três vezes em que a 113 virou float `1.0`, o último passo antes da verificação foi **subir o arquivo "Empty" (librarian `0x08`) para o slot carregado**, que o aparelho recarrega em seguida. Subir o "SAVE TEST" para o slot carregado não a mudou, e carregar o "Empty" pelo `0x14` também não.
+- [hipótese] A recarga depois de um upload aplica configurações do preset (o Variax?) que uma carga comum não aplica. Teste possível: subir o "Empty" para um slot que **não** é o atual e depois carregá-lo; e subir para o slot atual um preset com a chave 45 = 0.
 
 ## Em aberto
 
