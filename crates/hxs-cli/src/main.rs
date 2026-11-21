@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use hxs_core::backup;
-use hxs_core::device::{DeviceHandle, Event};
+use hxs_core::device::{DeviceHandle, Event, Options, snapshot_number};
 use hxs_core::notify::Notification;
 use hxs_core::globals::Globals;
 use hxs_core::preset::PresetFile;
@@ -78,6 +78,9 @@ enum Command {
         /// Do not read commands from standard input.
         #[arg(long)]
         no_input: bool,
+        /// The unit's MIDI base channel (for `snapshot`, sent as MIDI CC 69).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=16))]
+        midi_channel: u8,
     },
     /// Restore a whole backup: IRs, presets, favorites and global settings that differ
     /// from the unit (a dry run unless --yes), then compare again.
@@ -108,7 +111,7 @@ fn main() -> Result<()> {
         Command::RestorePreset { file, slot, name, setlist, yes } => restore_preset(timeout, &file, slot, &name, setlist, yes),
         Command::RestoreGlobals { path, yes } => restore_globals(timeout, &path, yes),
         Command::Restore { dir, yes } => restore_all(timeout, &dir, yes),
-        Command::Monitor { seconds, all, no_input } => monitor(timeout, seconds, all, no_input),
+        Command::Monitor { seconds, all, no_input, midi_channel } => monitor(timeout, seconds, all, no_input, midi_channel - 1),
         Command::DeleteIr { number, yes } => delete_ir(timeout, number, yes),
     }
 }
@@ -134,8 +137,8 @@ fn delete_ir(timeout: Duration, number: u64, yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool) -> Result<()> {
-    let (handle, events) = DeviceHandle::usb(timeout);
+fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool, midi_channel: u8) -> Result<()> {
+    let (handle, events) = DeviceHandle::usb(timeout, Options { midi_channel });
     let snapshot = handle.connect().wait().context("connecting to the HX Stomp")?;
     let globals = Globals::parse(snapshot.globals.clone())?;
     let start = Instant::now();
@@ -185,6 +188,10 @@ fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool) -> Result
                 println!("{t:9.3}  disconnected: {reason}");
                 break;
             }
+            Event::SnapshotSelected { index, bank } => match snapshot_number(*index, *bank) {
+                Some(n) => println!("{t:9.3}  snapshot {n} (bank {bank:?})", bank = bank.expect("a number implies a bank")),
+                None => println!("{t:9.3}  snapshot index {index} (bank unknown: {} or {})", index + 1, index + 4),
+            },
             Event::Connected(_) => {}
         }
     }
@@ -257,9 +264,9 @@ fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &
             ["block", block, state @ ("on" | "off")] => {
                 block.parse().map_err(anyhow::Error::from).and_then(|b| Ok(handle.set_block_enabled(b, *state == "on").wait()?))
             }
-            ["snapshot", n] => match n.parse::<u64>() {
-                Ok(n @ 1..=3) => handle.select_snapshot(n - 1).wait().map_err(anyhow::Error::from),
-                _ => Err(anyhow::anyhow!("snapshot takes 1, 2 or 3 (the live bank's)")),
+            ["snapshot", n] => match n.parse::<u8>() {
+                Ok(n @ 1..=6) => handle.recall_snapshot(n).wait().map_err(anyhow::Error::from),
+                _ => Err(anyhow::anyhow!("snapshot takes 1..6 (4..6 are HXtra's bank B)")),
             },
             [] => continue,
             _ => Err(anyhow::anyhow!("commands: {MONITOR_COMMANDS}")),
@@ -272,7 +279,7 @@ fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &
 }
 
 const MONITOR_COMMANDS: &str =
-    "select SLOT | set ID VALUE | param BLOCK INDEX VALUE (0.5 float, 3 int, true bool) | block BLOCK on|off | snapshot 1-3 | quit";
+    "select SLOT | set ID VALUE | param BLOCK INDEX VALUE (0.5 float, 3 int, true bool) | block BLOCK on|off | snapshot 1-6 (MIDI CC 69) | quit";
 
 /// A parameter value typed by how it is written: with a point a float, without one an int,
 /// `true`/`false` a bool (the unit drops a preset given a value of the wrong type).

@@ -10,6 +10,8 @@ pub enum Error {
     NotConnected,
     #[error("the device thread has stopped")]
     Stopped,
+    #[error("MIDI: {0}")]
+    Midi(String),
     #[error("USB: {0}")]
     Usb(nusb::Error),
     #[error("USB transfer: {0}")]

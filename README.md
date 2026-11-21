@@ -22,7 +22,7 @@ Early, command line only, Windows tested (HX Stomp, HXtra v1.2.1 on stock 3.80.0
 | `hxs inspect <file.l6p>` | sections of a preset file and its six snapshots | no (offline) |
 | `hxs restore-preset <file.l6p> --slot N --name NAME` | dry run by default; with `--yes` writes the file into the slot and reads it back to compare byte for byte | yes, one slot |
 | `hxs restore-globals <backup>` | dry run by default; with `--yes` writes the global settings with their original bytes (HX Edit's restore turns some ints into floats and rounds floats) and reads them back | yes |
-| `hxs monitor [--seconds N] [--all]` | keeps the connection open and prints the unit's events live (settings, preset loads, unknown notifications); accepts `select SLOT`, `set ID VALUE` (typed as the setting's current value) and `quit` | only when you type `select` or `set` |
+| `hxs monitor [--seconds N] [--all] [--midi-channel N]` | keeps the connection open and prints the unit's events live (settings, parameters, snapshots with their bank when known, preset loads, unknown notifications); accepts `select SLOT`, `set ID VALUE`, `param BLOCK INDEX VALUE`, `block BLOCK on\|off`, `snapshot 1-6` (over MIDI CC 69, which reaches HXtra's snapshots 4–6) and `quit` | only what you type; nothing is saved to a preset |
 | `hxs restore <backup>` | checks every backup file's SHA-256, lists only what differs from the unit (IRs, presets, favorites, global settings); with `--yes` writes that list and compares again | yes, what differs |
 
 Close HX Edit first: it holds the unit's USB interface while it runs.

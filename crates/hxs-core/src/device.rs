@@ -11,15 +11,40 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rmpv::Value;
 
+use crate::midi::{self, MidiPort};
 use crate::notify::{self, Notification};
+use crate::snapshot::Bank;
 use crate::stomp::{CurrentPreset, PresetEntry, Stomp};
 use crate::{Error, Result};
 
 pub const PUMP_EVERY: Duration = Duration::from_millis(50);
+/// A snapshot change the unit reports this soon after one this tool asked for is
+/// taken as that one's (each request was seen to bring exactly one, within ~0.1 s).
+const OWN_SNAPSHOT_WINDOW: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// The unit's MIDI base channel, 0..15 (MIDI channels 1..16).
+    pub midi_channel: u8,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { midi_channel: midi::DEFAULT_CHANNEL }
+    }
+}
+
+/// Snapshot 1..6 from the index the unit reports (0..2) and HXtra's bank, when known.
+pub fn snapshot_number(index: u64, bank: Option<Bank>) -> Option<u64> {
+    match bank? {
+        Bank::A => Some(index + 1),
+        Bank::B => Some(index + 4),
+    }
+}
 
 /// The unit's state as the device thread knows it.
 #[derive(Debug, Clone)]
@@ -33,6 +58,8 @@ pub struct Snapshot {
     pub globals: Vec<u8>,
     /// Settings the unit reported since, by ID (notification 0x16 carries no group).
     pub changed_settings: BTreeMap<u64, Value>,
+    /// HXtra's live snapshot bank as this thread infers it; `None` when unknown.
+    pub snapshot_bank: Option<Bank>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +70,8 @@ pub enum Event {
     PresetLoaded { current: CurrentPreset, edit_buffer: Vec<u8> },
     SettingChanged { id: u64, value: Value },
     PresetRenamed { setlist: u64, slot: u64, name: String },
+    /// The unit changed snapshot; [`snapshot_number`] gives 1..6 when the bank is known.
+    SnapshotSelected { index: u64, bank: Option<Bank> },
     /// Any other notification, [`Notification::Unknown`] included.
     Notified(Notification),
     /// Something failed without breaking the connection.
@@ -80,6 +109,7 @@ enum Request {
     SetParameter { block: u64, path: u64, index: u64, value: Value, reply: Reply<()> },
     SetBlockEnabled { block: u64, enabled: bool, reply: Reply<()> },
     SelectSnapshot { index: u64, reply: Reply<()> },
+    RecallSnapshot { number: u8, reply: Reply<()> },
     Job { run: Job, fail: Box<dyn FnOnce(Error) + Send> },
     Shutdown,
 }
@@ -91,10 +121,18 @@ pub struct DeviceHandle {
 
 impl DeviceHandle {
     /// Start the device thread; `connect` opens the unit each time a connection is asked for.
-    pub fn spawn(connect: impl FnMut() -> Result<Stomp> + Send + 'static) -> (Self, Receiver<Event>) {
+    pub fn spawn(connect: impl FnMut() -> Result<Stomp> + Send + 'static, options: Options) -> (Self, Receiver<Event>) {
         let (tx, rx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
-        let worker = Worker { connect: Box::new(connect), stomp: None, state: None, events: etx };
+        let worker = Worker {
+            connect: Box::new(connect),
+            options,
+            stomp: None,
+            midi: None,
+            banks: BankTracker::default(),
+            state: None,
+            events: etx,
+        };
         thread::Builder::new()
             .name("hx-stomp".into())
             .spawn(move || worker.run(rx))
@@ -103,8 +141,8 @@ impl DeviceHandle {
     }
 
     /// The HX Stomp on USB.
-    pub fn usb(timeout: Duration) -> (Self, Receiver<Event>) {
-        Self::spawn(move || Stomp::connect(timeout))
+    pub fn usb(timeout: Duration, options: Options) -> (Self, Receiver<Event>) {
+        Self::spawn(move || Stomp::connect(timeout), options)
     }
 
     pub fn connect(&self) -> Pending<Snapshot> {
@@ -136,8 +174,14 @@ impl DeviceHandle {
         self.ask(|reply| Request::SetBlockEnabled { block, enabled, reply })
     }
 
+    /// Snapshot `index` 0..2 of the live bank, over USB (editor 0x58).
     pub fn select_snapshot(&self, index: u64) -> Pending<()> {
         self.ask(|reply| Request::SelectSnapshot { index, reply })
+    }
+
+    /// Snapshot `number` 1..6 over MIDI CC 69, which reaches HXtra's bank B (4..6).
+    pub fn recall_snapshot(&self, number: u8) -> Pending<()> {
+        self.ask(|reply| Request::RecallSnapshot { number, reply })
     }
 
     /// Run `f` on the device thread with the connected unit (a backup, a restore...).
@@ -170,9 +214,46 @@ impl DeviceHandle {
 
 struct Worker {
     connect: Box<dyn FnMut() -> Result<Stomp> + Send>,
+    options: Options,
     stomp: Option<Stomp>,
+    midi: Option<MidiPort>,
+    banks: BankTracker,
     state: Option<Snapshot>,
     events: Sender<Event>,
+}
+
+/// HXtra's snapshot bank, which the unit does not report: a preset load starts in
+/// bank A, a recall this tool sent sets it, and a snapshot change it did not cause
+/// (a press of the lit footswitch, another MIDI source) leaves it unknown.
+#[derive(Debug, Default)]
+struct BankTracker {
+    bank: Option<Bank>,
+    own_pending: u32,
+    own_until: Option<Instant>,
+}
+
+impl BankTracker {
+    fn preset_loaded(&mut self) {
+        *self = Self { bank: Some(Bank::A), ..Self::default() };
+    }
+
+    /// This tool asked for a snapshot change; `bank` when the request sets one.
+    fn own_change(&mut self, bank: Option<Bank>, now: Instant) {
+        if bank.is_some() {
+            self.bank = bank;
+        }
+        self.own_pending += 1;
+        self.own_until = Some(now + OWN_SNAPSHOT_WINDOW);
+    }
+
+    /// The unit reported a snapshot change; returns the bank after it.
+    fn snapshot_reported(&mut self, now: Instant) -> Option<Bank> {
+        match self.own_until {
+            Some(until) if self.own_pending > 0 && now <= until => self.own_pending -= 1,
+            _ => *self = Self::default(),
+        }
+        self.bank
+    }
 }
 
 impl Worker {
@@ -220,7 +301,20 @@ impl Worker {
                 let _ = reply.send(self.with_stomp(|s| s.set_block_enabled(block, enabled)));
             }
             Request::SelectSnapshot { index, reply } => {
-                let _ = reply.send(self.with_stomp(|s| s.select_snapshot(index)));
+                let result = self.with_stomp(|s| s.select_snapshot(index));
+                if result.is_ok() {
+                    self.banks.own_change(None, Instant::now());
+                }
+                let _ = reply.send(result);
+            }
+            Request::RecallSnapshot { number, reply } => {
+                let result = self.recall_snapshot(number);
+                if result.is_ok() {
+                    let bank = if number > 3 { Bank::B } else { Bank::A };
+                    self.banks.own_change(Some(bank), Instant::now());
+                    self.set_bank(Some(bank));
+                }
+                let _ = reply.send(result);
             }
             Request::Job { run, fail } => match self.stomp.as_mut() {
                 Some(stomp) => {
@@ -240,10 +334,28 @@ impl Worker {
         }
         let mut stomp = (self.connect)()?;
         let snapshot = read_snapshot(&mut stomp)?;
+        self.banks = BankTracker::default();
         self.stomp = Some(stomp);
         self.state = Some(snapshot.clone());
         self.emit(Event::Connected(snapshot.clone()));
         Ok(snapshot)
+    }
+
+    fn recall_snapshot(&mut self, number: u8) -> Result<()> {
+        if self.stomp.is_none() {
+            return Err(Error::NotConnected);
+        }
+        let port = match self.midi.as_mut() {
+            Some(port) => port,
+            None => self.midi.insert(MidiPort::open(self.options.midi_channel)?),
+        };
+        port.recall_snapshot(number)
+    }
+
+    fn set_bank(&mut self, bank: Option<Bank>) {
+        if let Some(state) = self.state.as_mut() {
+            state.snapshot_bank = bank;
+        }
     }
 
     fn with_stomp<T>(&mut self, f: impl FnOnce(&mut Stomp) -> Result<T>) -> Result<T> {
@@ -289,6 +401,14 @@ impl Worker {
                 }
                 self.emit(Event::PresetRenamed { setlist, slot, name });
             }
+            Notification::SnapshotSelected { index } => {
+                let bank = self.banks.snapshot_reported(Instant::now());
+                self.set_bank(bank);
+                if let Some(state) = self.state.as_mut() {
+                    state.current.snapshot = Some(index);
+                }
+                self.emit(Event::SnapshotSelected { index, bank });
+            }
             Notification::Completion { .. } => {}
             other => self.emit(Event::Notified(other)),
         }
@@ -301,9 +421,11 @@ impl Worker {
         match read {
             Ok((current, _)) if (current.setlist, current.slot) != (setlist, slot) => {}
             Ok((current, edit_buffer)) => {
+                self.banks.preset_loaded();
                 if let Some(state) = self.state.as_mut() {
                     state.current = current.clone();
                     state.edit_buffer = edit_buffer.clone();
+                    state.snapshot_bank = Some(Bank::A);
                 }
                 self.emit(Event::PresetLoaded { current, edit_buffer });
             }
@@ -315,6 +437,7 @@ impl Worker {
     fn lost(&mut self, reason: String) {
         self.stomp = None;
         self.state = None;
+        self.banks = BankTracker::default();
         self.emit(Event::Disconnected { reason });
     }
 
@@ -332,6 +455,7 @@ fn read_snapshot(stomp: &mut Stomp) -> Result<Snapshot> {
         globals: stomp.globals()?,
         current,
         changed_settings: BTreeMap::new(),
+        snapshot_bank: None,
     })
 }
 
@@ -341,6 +465,7 @@ fn breaks_connection(e: &Error) -> bool {
         Error::NotFound | Error::Busy | Error::Usb(_) | Error::Transfer(_) | Error::Timeout(..) | Error::Protocol(_) | Error::Decode(_) => true,
         Error::NotConnected
         | Error::Stopped
+        | Error::Midi(_)
         | Error::Refused { .. }
         | Error::Preset(_)
         | Error::Backup(_)
@@ -425,7 +550,31 @@ mod tests {
 
     fn start(sim: &SimDevice) -> (DeviceHandle, Receiver<Event>) {
         let link_of = sim.clone();
-        DeviceHandle::spawn(move || Stomp::over(link_of.link(), T))
+        DeviceHandle::spawn(move || Stomp::over(link_of.link(), T), Options::default())
+    }
+
+    #[test]
+    fn the_bank_is_known_only_after_a_load_or_a_recall_of_ours() {
+        let t = Instant::now();
+        let ms = Duration::from_millis;
+        let mut b = BankTracker::default();
+        assert_eq!(b.snapshot_reported(t), None);
+        b.preset_loaded();
+        b.own_change(Some(Bank::B), t);
+        assert_eq!(b.snapshot_reported(t + ms(100)), Some(Bank::B));
+        assert_eq!(b.snapshot_reported(t + ms(200)), None, "a change nobody here asked for");
+        b.preset_loaded();
+        b.own_change(None, t);
+        assert_eq!(b.snapshot_reported(t + ms(150)), Some(Bank::A), "a USB select stays in the bank");
+        b.own_change(None, t);
+        assert_eq!(b.snapshot_reported(t + ms(2000)), None, "too late to be ours");
+    }
+
+    #[test]
+    fn snapshot_numbers_need_the_bank() {
+        assert_eq!(snapshot_number(0, Some(Bank::B)), Some(4));
+        assert_eq!(snapshot_number(2, Some(Bank::A)), Some(3));
+        assert_eq!(snapshot_number(1, None), None);
     }
 
     fn wait_for(events: &Receiver<Event>, what: impl Fn(&Event) -> bool) -> Event {

@@ -13,7 +13,7 @@ Ordem sugerida, cada item com captura ou teste no aparelho antes do código:
 1. ~~Testar `select` e `set`~~ (feito); ~~decodificar parâmetro, bloco movido, snapshot e footswitch~~ (feito); ~~mudar parâmetro, ligar/desligar bloco e selecionar snapshot ao vivo~~ (feito e testado no aparelho).
 2. Ainda a confirmar com ações isoladas: `0x05` (preset salvo), `0x1a`, `0x22` (controllers), `0x17 {0x17: 0}`, e as configurações 19 e 21.
 3. Implementar, na ordem, cada um testado no aparelho num preset de teste:
-   - snapshots 4–6 do HXtra: o aparelho reporta o mesmo índice nos dois bancos; descobrir como o app sabe o banco e como selecionar o 4–6 (o `0x58` só aceita 0..2?);
+   - ~~selecionar os snapshots 4–6~~ (feito por MIDI CC 69, com o banco inferido). Falta saber o banco quando a troca é feita no aparelho: propor ao HXtra um comando USB (issue primeiro) que informe e mude o banco;
    - trocar modelo (78 + 40);
    - salvar preset (71 = `0x47`?): conferir que, salvando no banco B, os snapshots 4–6 vão para o arquivo (a lógica de troca de banco do firmware).
 4. O espelho de estado (`DeviceState`) passa a aplicar esses eventos ao edit buffer decodificado.

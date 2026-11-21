@@ -13,6 +13,7 @@ hxs-core = { path = "crates/hxs-core" }
 nusb = "0.2.9"
 rmpv = "1.3.1"
 rmp = "0.8.15"
+midir = "0.11.1"
 thiserror = "2.0.21"
 anyhow = "1.0.104"
 clap = { version = "4.6.9", features = ["derive"] }

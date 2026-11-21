@@ -88,6 +88,8 @@ pub struct CurrentPreset {
     pub slot: u64,
     pub name: String,
     pub modified: bool,
+    /// The current snapshot's index, 0..2 within the live bank (key 0x5c).
+    pub snapshot: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +170,7 @@ impl Stomp {
             slot: msg::get(&r, key::PRESET).and_then(Value::as_u64).ok_or_else(|| missing("current preset", "slot"))?,
             name: msg::get(&r, key::NAME).and_then(msg::text).unwrap_or_default(),
             modified: msg::get(&r, key::MODIFIED).and_then(Value::as_bool).unwrap_or(false),
+            snapshot: msg::get(&r, key::SNAPSHOT).and_then(Value::as_u64),
         })
     }
 

@@ -209,7 +209,8 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [fato] Com o preset 010 carregado, `CC 69 = 3` (canal 1), enviado do Windows pela porta `Line 6 HX Stomp 1`, foi aceito: o aparelho mandou o trio de snapshot com `0x5c: 0`. `CC 69 = 0`, 4 s depois, mandou o mesmo trio com `0x5c: 0`. Os dois são indistinguíveis pelo USB, o que confirma que o banco não aparece nos eventos.
 - [fato] O Stomp não mandou nenhuma mensagem pela própria saída MIDI (porta `Line 6 HX Stomp 0`) durante o teste.
 - [fato] Recarregar o 010 (`select 10`) e conferir com o backup: nada gravado mudou.
-- [a confirmar de ouvido] Se o som mudou para o snapshot 4 (more DELAY/VERB) entre o CC 69 = 3 e o CC 69 = 0.
+- [verificado no aparelho pelo usuário, na segunda execução com 8 s no snapshot 4] A tela mostrou o snapshot 4, e o som mudou para o more DELAY/VERB e voltou.
+- [fato] Implementado no `hxs-core` (`midi.rs`, com `midir`): `DeviceHandle::recall_snapshot(1..6)` manda o CC 69 pela saída MIDI "HX Stomp" no canal configurado (padrão 1). A thread infere o banco: A depois de uma carga de preset, o banco pedido depois de um recall do próprio app, desconhecido depois de uma troca que o app não causou (um evento de snapshot sem pedido nosso no último segundo). No aparelho: `snapshot 4` → "snapshot 4 (bank B)", `snapshot 1` → "snapshot 1 (bank A)".
 - Script: `midi_snapshot_test.py` (no scratchpad desta sessão, com `mido`): `hxs monitor` como subprocesso, mais a saída e a entrada MIDI numa linha do tempo só.
 
 ## Em aberto
