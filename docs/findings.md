@@ -142,6 +142,11 @@ Ações do usuário no HX Edit: importar um IR e apagá-lo; mudar FS4 Function e
 - [não testado no aparelho] A gravação de IR pelo `hxs` (`0x0f` + `0x09`): o pedido é igual byte a byte ao do HX Edit (teste unitário), mas nenhum IR diferia.
 - [adiado] User Model Defaults: as 1162 consultas `0x6d` (e as gravações `0x6f`) percorrem uma lista de combinações modelo/cab que o HX Edit traz embutida; gerá-la exige o catálogo do firmware do usuário (etapa 4). O aparelho de teste não tem nenhum User Model Default.
 
+## Notify com a conexão aberta (2026-11-21, `hxs monitor`)
+
+- [fato] O envelope dos eventos é `{0x52, 0x44, 0x79, 0x6a}`. O tipo `0x16` tem pelo menos dois subtipos: `0x44: 9, 0x79: 0x19` com `{0x76: id, 0x77: valor}` (configuração mudou) e `0x44: 10, 0x79: 0x1b` com payload nil, que chega cerca de 10 vezes por segundo com o aparelho parado. O significado deste último é desconhecido.
+- [fato] A configuração 157 é reportada cerca de 13 vezes por segundo com o aparelho parado, alternando entre 0,19005 e 0,20005.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

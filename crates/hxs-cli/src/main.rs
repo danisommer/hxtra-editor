@@ -1,9 +1,15 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use hxs_core::backup::{self, Event};
+use hxs_core::backup;
+use hxs_core::device::{DeviceHandle, Event};
+use hxs_core::notify::Notification;
 use hxs_core::globals::Globals;
 use hxs_core::preset::PresetFile;
 use rmpv::Value;
@@ -54,6 +60,18 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Print the unit's events live; type `select SLOT`, `set ID VALUE` or `quit`.
+    Monitor {
+        /// Stop after this many seconds (0: until `quit`).
+        #[arg(long, default_value_t = 0)]
+        seconds: u64,
+        /// Print every setting change (by default each setting prints at most once a second).
+        #[arg(long)]
+        all: bool,
+        /// Do not read commands from standard input.
+        #[arg(long)]
+        no_input: bool,
+    },
     /// Restore a whole backup: IRs, presets, favorites and global settings that differ
     /// from the unit (a dry run unless --yes), then compare again.
     Restore {
@@ -83,7 +101,150 @@ fn main() -> Result<()> {
         Command::RestorePreset { file, slot, name, setlist, yes } => restore_preset(timeout, &file, slot, &name, setlist, yes),
         Command::RestoreGlobals { path, yes } => restore_globals(timeout, &path, yes),
         Command::Restore { dir, yes } => restore_all(timeout, &dir, yes),
+        Command::Monitor { seconds, all, no_input } => monitor(timeout, seconds, all, no_input),
     }
+}
+
+fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool) -> Result<()> {
+    let (handle, events) = DeviceHandle::usb(timeout);
+    let snapshot = handle.connect().wait().context("connecting to the HX Stomp")?;
+    let globals = Globals::parse(snapshot.globals.clone())?;
+    let start = Instant::now();
+    println!(
+        "connected (USB {:04x}): setlist {} slot {:03} \"{}\"{}, {} presets",
+        snapshot.product_id,
+        snapshot.current.setlist,
+        snapshot.current.slot,
+        snapshot.current.name,
+        if snapshot.current.modified { " (modified)" } else { "" },
+        snapshot.presets.len()
+    );
+    let quit = Arc::new(AtomicBool::new(false));
+    if !no_input {
+        println!("commands: select SLOT | set ID VALUE | quit");
+        let (handle, quit, setlist) = (handle.clone(), quit.clone(), snapshot.current.setlist);
+        thread::spawn(move || read_commands(&handle, &globals, setlist, &quit));
+    }
+    let deadline = (seconds > 0).then(|| start + Duration::from_secs(seconds));
+    let mut limiter = RateLimit::new(all);
+    while !quit.load(Ordering::Relaxed) && deadline.is_none_or(|d| Instant::now() < d) {
+        let Ok(event) = events.recv_timeout(Duration::from_millis(100)) else { continue };
+        let t = start.elapsed().as_secs_f64();
+        match &event {
+            Event::SettingChanged { id, value } => {
+                if limiter.allows(format!("setting {id}")) {
+                    println!("{t:9.3}  setting {id} = {}", value_text(value));
+                }
+            }
+            Event::PresetLoaded { current, edit_buffer } => {
+                println!("{t:9.3}  preset loaded: setlist {} slot {:03} \"{}\" ({} bytes)", current.setlist, current.slot, current.name, edit_buffer.len())
+            }
+            Event::PresetRenamed { setlist, slot, name } => println!("{t:9.3}  preset renamed: setlist {setlist} slot {slot:03} \"{name}\""),
+            Event::Notified(Notification::Unknown { kind, note }) => {
+                if limiter.allows(format!("unknown {}", signature(*kind, note))) {
+                    println!("{t:9.3}  UNKNOWN notification {}: {note}", signature(*kind, note));
+                }
+            }
+            Event::Notified(n) => println!("{t:9.3}  {n:?}"),
+            Event::Problem { message } => println!("{t:9.3}  problem: {message}"),
+            Event::Disconnected { reason } => {
+                println!("{t:9.3}  disconnected: {reason}");
+                break;
+            }
+            Event::Connected(_) => {}
+        }
+    }
+    if let Some(summary) = limiter.summary() {
+        println!("not printed (each kind at most once a second; --all prints them): {summary}");
+    }
+    handle.disconnect().wait()?;
+    handle.shutdown();
+    Ok(())
+}
+
+/// Prints each kind of line at most once a second (unless `all`) and counts the rest.
+struct RateLimit {
+    all: bool,
+    last: HashMap<String, Instant>,
+    hidden: BTreeMap<String, u64>,
+}
+
+impl RateLimit {
+    fn new(all: bool) -> Self {
+        Self { all, last: HashMap::new(), hidden: BTreeMap::new() }
+    }
+
+    fn allows(&mut self, key: String) -> bool {
+        let recent = self.last.get(&key).is_some_and(|t| t.elapsed() < Duration::from_secs(1));
+        match self.all || !recent {
+            true => {
+                self.last.insert(key, Instant::now());
+                true
+            }
+            false => {
+                *self.hidden.entry(key).or_default() += 1;
+                false
+            }
+        }
+    }
+
+    fn summary(&self) -> Option<String> {
+        (!self.hidden.is_empty()).then(|| self.hidden.iter().map(|(k, n)| format!("{k} x{n}")).collect::<Vec<_>>().join(", "))
+    }
+}
+
+/// `kind/0x44/0x79` of a notification, the fields that tell its sub-kinds apart.
+fn signature(kind: Option<u64>, note: &Value) -> String {
+    let body = hxs_core::msg::notification(note).map(|(_, b)| b);
+    let field = |k| body.and_then(|b| hxs_core::msg::get(b, k)).and_then(Value::as_u64).map_or("?".into(), |v| format!("{v:#x}"));
+    format!("kind {}/{}/{}", kind.map_or("?".into(), |k| format!("{k:#04x}")), field(0x44), field(0x79))
+}
+
+fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &AtomicBool) {
+    for line in std::io::stdin().lines() {
+        let Ok(line) = line else { break };
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let outcome = match words.as_slice() {
+            ["quit"] | ["exit"] => {
+                quit.store(true, Ordering::Relaxed);
+                return;
+            }
+            ["select", slot] => slot.parse().map_err(anyhow::Error::from).and_then(|s| Ok(handle.select_preset(setlist, s).wait()?)),
+            ["set", id, value] => id
+                .parse()
+                .map_err(anyhow::Error::from)
+                .and_then(|id| typed_value(globals, id, value).map(|v| (id, v)))
+                .and_then(|(id, v)| Ok(handle.set_setting(id, v).wait()?)),
+            [] => continue,
+            _ => Err(anyhow::anyhow!("commands: select SLOT | set ID VALUE | quit")),
+        };
+        match outcome {
+            Ok(()) => println!("ok: {line}"),
+            Err(e) => println!("failed: {line}: {e:#}"),
+        }
+    }
+}
+
+/// Parse `text` as the type the setting holds now (the unit drops values of the wrong type).
+fn typed_value(globals: &Globals, id: u64, text: &str) -> Result<Value> {
+    let current = globals
+        .entries()
+        .iter()
+        .filter(|e| e.id == id)
+        .min_by_key(|e| e.group == 3)
+        .map(|e| &e.value)
+        .with_context(|| format!("setting {id} is not among the unit's settings"))?;
+    Ok(match current {
+        Value::F32(_) => Value::F32(text.parse().with_context(|| format!("setting {id} holds a float"))?),
+        Value::F64(_) => Value::F64(text.parse().with_context(|| format!("setting {id} holds a double"))?),
+        Value::Integer(_) => Value::from(text.parse::<i64>().with_context(|| format!("setting {id} holds an int"))?),
+        Value::Boolean(_) => Value::from(match text {
+            "true" | "1" | "on" => true,
+            "false" | "0" | "off" => false,
+            _ => anyhow::bail!("setting {id} holds a bool (true/false)"),
+        }),
+        other => anyhow::bail!("setting {id} holds {other}, which this command does not write"),
+    })
 }
 
 fn restore_all(timeout: Duration, dir: &std::path::Path, yes: bool) -> Result<()> {
@@ -254,12 +415,12 @@ fn run_backup(timeout: Duration, dir: &std::path::Path, setlist: u64) -> Result<
     let mut stomp = connect(timeout)?;
     let tool = format!("hxs {}", env!("CARGO_PKG_VERSION"));
     let manifest = backup::run(&mut stomp, dir, setlist, &tool, |e| match e {
-        Event::Preset { slot, total, name, bank_b } => {
+        backup::Event::Preset { slot, total, name, bank_b } => {
             println!("preset   {slot:03} ({}/{total}) {name}{}", slot + 1, if bank_b { "  [snapshots 4-6]" } else { "" })
         }
-        Event::Ir { done, total, name } => println!("IR       {done}/{total} {name}"),
-        Event::Favorite { done, total, name } => println!("favorite {done}/{total} {name}"),
-        Event::Globals => println!("globals  done"),
+        backup::Event::Ir { done, total, name } => println!("IR       {done}/{total} {name}"),
+        backup::Event::Favorite { done, total, name } => println!("favorite {done}/{total} {name}"),
+        backup::Event::Globals => println!("globals  done"),
     })
     .with_context(|| format!("backing up into {}", dir.display()))?;
     let with_b = manifest.presets.iter().filter(|p| p.bank_b).count();
