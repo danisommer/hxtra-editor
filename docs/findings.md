@@ -213,6 +213,19 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [fato] Implementado no `hxs-core` (`midi.rs`, com `midir`): `DeviceHandle::recall_snapshot(1..6)` manda o CC 69 pela saída MIDI "HX Stomp" no canal configurado (padrão 1). A thread infere o banco: A depois de uma carga de preset, o banco pedido depois de um recall do próprio app, desconhecido depois de uma troca que o app não causou (um evento de snapshot sem pedido nosso no último segundo). No aparelho: `snapshot 4` → "snapshot 4 (bank B)", `snapshot 1` → "snapshot 1 (bank A)".
 - Script: `midi_snapshot_test.py` (no scratchpad desta sessão, com `mido`): `hxs monitor` como subprocesso, mais a saída e a entrada MIDI numa linha do tempo só.
 
+## Salvar preset (2026-11-21, captura `16`, slot de teste 011 = cópia do 010 com banco B)
+
+- [fato] O HX Edit salva com o editor **`0x47`** `{0x6b: setlist, 0x6c: slot, 0x6d: nome}`, que responde direto com status 0. Em seguida vêm os eventos **`5`** `{0x6b, 0x6c, 0x74: u32}` (**preset salvo**: confirma a inferência do monitor) e `6` (nome). O knob arrastado gerou 26 × `0x1e` (bloco 4, parâmetro 2: Attack do compressor, 0,027 → 0,074 s).
+- [fato] O arquivo salvo, comparado com o 010 original:
+  - **a seção `0x64` (snapshots 4–6) continua byte a byte idêntica** — salvar pelo HX Edit preserva o banco B;
+  - seção 0: só o Attack mudou;
+  - seção 4 (controllers): as duas atribuições do footswitch "more VERB" trocaram de ordem, com o mesmo conteúdo;
+  - seção 6: o bloco selecionado foi de 3 para 4;
+  - as outras seções estão idênticas.
+- [fato] As configurações 16, 45, 49, 56 e 134 do aparelho ficaram com os valores da seção 5 do preset carregado (o 011): **as configurações da seção 5 de um preset acompanham o preset atual.** O `hxs restore-globals` / `restore` não as restaura mais (16, 30, 45–56, 134). Antes ele restaurava, o que teria mudado o preset carregado.
+- [fato, causa desconhecida] A configuração 113 (container `preset_color` do HXtra) passou de int `0` a float `1.0` durante a sessão do HX Edit ou o salvamento. Ela era int `0` em todos os backups anteriores, e na verificação depois do teste MIDI ainda não tinha mudado. Como float, o HXtra lê o Preset LED Color como padrão.
+- [fato, sem reprodução ainda] Uma conexão aberta logo depois de outra fechar falhou no select do notify: o "reply" continha o começo de uma mensagem antiga seguido da resposta de select (`00 00 04 00 01 00 00 00 04`). Um segundo depois, a mesma conexão funcionou. [inferência] O aparelho pode entregar, num stream novo, restos do stream anterior na mesma porta. A correção pensada é reabrir o canal quando a resposta de select não confere.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

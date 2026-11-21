@@ -22,10 +22,11 @@ pub const NOT_RESTORED: &[(u64, &[u64])] = &[
     (2, &[21, 28, 29, 64, 74, 78, 118, 119, 120, 121, 122, 123, 124, 125, 132]),
 ];
 
-/// IDs HX Edit does restore but this restore leaves alone, because they follow
-/// the current preset rather than the user's settings: 16 is the current
-/// preset's tempo (`TempoPreset` in HX Edit's backups).
-pub const FOLLOWS_CURRENT_PRESET: &[(u64, &[u64])] = &[(2, &[16])];
+/// IDs this restore leaves alone, because they follow the current preset rather
+/// than the user's settings: the ones a preset file carries in its section 5,
+/// which the unit applies with each preset it loads (16 is the preset's tempo,
+/// `TempoPreset` in HX Edit's backups). HX Edit's restore does write them.
+pub const FOLLOWS_CURRENT_PRESET: &[(u64, &[u64])] = &[(2, &[16, 30, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 134])];
 
 #[derive(Debug, Clone)]
 pub struct Entry {
