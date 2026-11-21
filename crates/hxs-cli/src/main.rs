@@ -264,6 +264,11 @@ fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &
             ["block", block, state @ ("on" | "off")] => {
                 block.parse().map_err(anyhow::Error::from).and_then(|b| Ok(handle.set_block_enabled(b, *state == "on").wait()?))
             }
+            ["save"] => handle
+                .state()
+                .wait()
+                .map_err(anyhow::Error::from)
+                .and_then(|s| Ok(handle.save_preset(s.current.setlist, s.current.slot as usize, &s.current.name).wait()?)),
             ["snapshot", n] => match n.parse::<u8>() {
                 Ok(n @ 1..=6) => handle.recall_snapshot(n).wait().map_err(anyhow::Error::from),
                 _ => Err(anyhow::anyhow!("snapshot takes 1..6 (4..6 are HXtra's bank B)")),
@@ -279,7 +284,7 @@ fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &
 }
 
 const MONITOR_COMMANDS: &str =
-    "select SLOT | set ID VALUE | param BLOCK INDEX VALUE (0.5 float, 3 int, true bool) | block BLOCK on|off | snapshot 1-6 (MIDI CC 69) | quit";
+    "select SLOT | set ID VALUE | param BLOCK INDEX VALUE (0.5 float, 3 int, true bool) | block BLOCK on|off | snapshot 1-6 (MIDI CC 69) | save (stores the current preset in its slot) | quit";
 
 /// A parameter value typed by how it is written: with a point a float, without one an int,
 /// `true`/`false` a bool (the unit drops a preset given a value of the wrong type).

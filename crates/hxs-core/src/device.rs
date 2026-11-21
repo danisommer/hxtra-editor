@@ -110,6 +110,7 @@ enum Request {
     SetBlockEnabled { block: u64, enabled: bool, reply: Reply<()> },
     SelectSnapshot { index: u64, reply: Reply<()> },
     RecallSnapshot { number: u8, reply: Reply<()> },
+    SavePreset { setlist: u64, slot: usize, name: String, reply: Reply<()> },
     Job { run: Job, fail: Box<dyn FnOnce(Error) + Send> },
     Shutdown,
 }
@@ -177,6 +178,12 @@ impl DeviceHandle {
     /// Snapshot `index` 0..2 of the live bank, over USB (editor 0x58).
     pub fn select_snapshot(&self, index: u64) -> Pending<()> {
         self.ask(|reply| Request::SelectSnapshot { index, reply })
+    }
+
+    /// Store the edit buffer into a slot with a name (see [`Stomp::save_preset`]).
+    pub fn save_preset(&self, setlist: u64, slot: usize, name: &str) -> Pending<()> {
+        let name = name.to_owned();
+        self.ask(|reply| Request::SavePreset { setlist, slot, name, reply })
     }
 
     /// Snapshot `number` 1..6 over MIDI CC 69, which reaches HXtra's bank B (4..6).
@@ -306,6 +313,9 @@ impl Worker {
                     self.banks.own_change(None, Instant::now());
                 }
                 let _ = reply.send(result);
+            }
+            Request::SavePreset { setlist, slot, name, reply } => {
+                let _ = reply.send(self.with_stomp(|s| s.save_preset(setlist, slot, &name)));
             }
             Request::RecallSnapshot { number, reply } => {
                 let result = self.recall_snapshot(number);

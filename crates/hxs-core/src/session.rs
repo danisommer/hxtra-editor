@@ -93,14 +93,39 @@ impl Session {
             open: true,
             closing: false,
         });
-        self.connect(id)?;
-        let select = [&msg::header(u16::from(port.service), 1)[..], &[port.service]].concat();
-        self.send(id, &select)?;
-        let reply = self.read_message(id)?;
-        match reply.as_slice() {
-            [svc] if *svc == port.service => Ok(id),
-            other => Err(Error::Protocol(format!("service {} select: unexpected reply {other:02x?}", port.service))),
+        for attempt in 1..=CONNECT_ATTEMPTS {
+            match self.select_service(id, port.service) {
+                Ok(()) => return Ok(id),
+                Err(e) if attempt == CONNECT_ATTEMPTS => return Err(e),
+                Err(_) => self.abandon_stream(id),
+            }
         }
+        unreachable!("the last attempt returns")
+    }
+
+    /// SYN, then the service select and its one-byte echo. Right after another
+    /// session closed, the unit was seen to put the start of an older message ahead
+    /// of the echo on the new stream; [`Session::open_channel`] then starts over.
+    fn select_service(&mut self, id: ChannelId, service: u8) -> Result<()> {
+        self.connect(id)?;
+        let select = [&msg::header(u16::from(service), 1)[..], &[service]].concat();
+        self.send(id, &select)?;
+        match self.read_message(id)?.as_slice() {
+            [svc] if *svc == service => Ok(()),
+            other => Err(Error::Protocol(format!("service {service} select: unexpected reply {other:02x?}"))),
+        }
+    }
+
+    /// Close a stream whose start went wrong, so the next SYN finds the port free.
+    fn abandon_stream(&mut self, id: ChannelId) {
+        if !self.channels[id.0].stream.is_connected() {
+            return;
+        }
+        let fin = self.channels[id.0].stream.fin();
+        let _ = self.link.write(&fin);
+        let end = Instant::now() + CLOSE_DRAIN;
+        while Instant::now() < end && !self.channels[id.0].stream.peer_closed() && self.poll().is_ok() {}
+        self.channels[id.0].error = None;
     }
 
     /// Open the channel the device reports asynchronous completions and state changes on.
@@ -375,6 +400,18 @@ mod tests {
             other => panic!("expected a refusal, got {other:?}"),
         }
         assert!(matches!(s.request(ed, 0x99, Value::Nil), Err(Error::Refused { .. })));
+    }
+
+    #[test]
+    fn a_stale_message_before_the_select_echo_is_survived() {
+        let sim = SimDevice::new();
+        sim.on(6, 0x17, |_| SimReply::Done(Value::from(1)));
+        let before = [&msg::header(4, 23)[..], &[0x82, 0x69]].concat();
+        sim.stale_select_once(before, vec![0; 12]);
+        let mut s = Session::over(sim.link(), T);
+        s.open_notify(NOTIFY).unwrap();
+        let ed = s.open_channel(EDITOR).unwrap();
+        assert_eq!(s.request(ed, 0x17, Value::Nil).unwrap().as_u64(), Some(1));
     }
 
     #[test]

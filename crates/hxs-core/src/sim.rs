@@ -47,6 +47,7 @@ struct State {
     handlers: HashMap<(u8, u8), Handler>,
     requests: Vec<(u8, u8, Value)>,
     unplugged: bool,
+    stale_select: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 struct SimStream {
@@ -87,6 +88,12 @@ impl SimDevice {
 
     pub fn link(&self) -> Box<dyn Link> {
         Box::new(self.clone())
+    }
+
+    /// Around the next service-select echo, send `before` and `after` as stream data,
+    /// as the unit did once right after another session closed.
+    pub fn stale_select_once(&self, before: Vec<u8>, after: Vec<u8>) {
+        self.state().stale_select = Some((before, after));
     }
 
     /// From now on every read and write fails, as when the cable is pulled.
@@ -180,7 +187,14 @@ impl State {
                 (None, [svc]) => {
                     s.service = Some(*svc);
                     let svc = *svc;
+                    let stale = self.stale_select.take();
+                    if let Some((before, _)) = &stale {
+                        self.send(host, flags::DATA, before.clone(), None);
+                    }
                     self.send_message(host, svc, &[svc]);
+                    if let Some((_, after)) = stale {
+                        self.send(host, flags::DATA, after, None);
+                    }
                 }
                 (None, _) => return Err(Error::Protocol("simulated device: a request before the service select".into())),
                 (Some(svc), _) => self.answer(host, svc, &body)?,

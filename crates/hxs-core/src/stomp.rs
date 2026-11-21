@@ -29,6 +29,7 @@ mod editor_cmd {
     pub const CURRENT_PRESET: u8 = 0x17;
     pub const SET_SETTING: u8 = 0x19;
     pub const SET_PARAMETER: u8 = 0x1e;
+    pub const SAVE_PRESET: u8 = 0x47;
     pub const SET_BLOCK_ENABLED: u8 = 0x29;
     pub const SELECT_SNAPSHOT: u8 = 0x58;
     pub const GLOBALS: u8 = 0x55;
@@ -201,6 +202,14 @@ impl Stomp {
         self.session.request(self.editor, editor_cmd::SET_PARAMETER, params).map(drop)
     }
 
+    /// Store the edit buffer into a preset slot with a name (editor 0x47), as HX Edit's
+    /// Save does. The unit serializes the preset itself, so HXtra's snapshots 4..6 go
+    /// with it; it then reports notification 5 (saved).
+    pub fn save_preset(&mut self, setlist: u64, slot: usize, name: &str) -> Result<()> {
+        validate_name(name)?;
+        self.session.request(self.editor, editor_cmd::SAVE_PRESET, save_params(setlist, slot, name)).map(drop)
+    }
+
     /// Turn a block on or off in the edit buffer (editor 0x29). Nothing is stored.
     pub fn set_block_enabled(&mut self, block: u64, enabled: bool) -> Result<()> {
         let params = int_map(&[(key::BLOCK, Value::from(block)), (key::ENABLED, Value::from(enabled))]);
@@ -346,6 +355,15 @@ impl Stomp {
     pub fn batch_end(&mut self) -> Result<()> {
         self.session.request(self.librarian, librarian_cmd::BATCH_END, empty_map()).map(drop)
     }
+}
+
+/// `{0x6b: setlist, 0x6c: slot, 0x6d: "name\0"}`, as HX Edit sends its Save.
+fn save_params(setlist: u64, slot: usize, name: &str) -> Value {
+    int_map(&[
+        (key::SETLIST, Value::from(setlist)),
+        (key::PRESET, Value::from(slot as u64)),
+        (key::NAME, Value::from(format!("{name}\0"))),
+    ])
 }
 
 /// `{0x6e: str(blob)}`, as HX Edit sends its globals restore.
@@ -532,6 +550,12 @@ mod tests {
         let head = hex("8366cd03f1645665816eda026c");
         assert_eq!(&req[..head.len()], &head[..]);
         assert_eq!(&req[head.len()..], &blob[..]);
+    }
+
+    #[test]
+    fn save_request_matches_hx_edit() {
+        let req = msg::encode_request(1037, editor_cmd::SAVE_PRESET, save_params(0, 11, "SAVE TEST"));
+        assert_eq!(req, hex("8366cd040d644765836b006c0b6daa53415645205445535400"));
     }
 
     #[test]
