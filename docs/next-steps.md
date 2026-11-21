@@ -33,6 +33,7 @@ Ordem sugerida, cada item com captura ou teste no aparelho antes do código:
 
 - ~~Primeira versão funcional (`hxtra-editor`, egui)~~ (feita, sem cuidado visual): presets, blocos e parâmetros, capturas pelo nome, snapshots 1–6, salvar, backup, restauração com comparação, gravar um preset, IRs, catálogo e globais.
 - Próximo: o usuário testa e aponta problemas; depois, a direção visual.
+- As funcionalidades que faltam (subir `.nam`, tap tempo, cadeia de sinal, bypass e controllers, abas de favoritos e IRs...) e as propostas para o HXtra estão em `decisions.md`.
 
 ## Depois
 
