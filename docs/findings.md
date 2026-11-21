@@ -96,6 +96,30 @@ Feitas com USBPcap no hub 5, dispositivo 1, e decodificadas por `scripts/decode_
 - [fato] O build HXtra v1.2.1 do usuário não tem o espelho de tela (`0x52` recusado com status 255, erro −45).
 - [verificado no aparelho pelo usuário] Seguindo o procedimento (snapshot 1 aceso, depois o footswitch 1 de novo para ir ao banco B), o snapshot 4 do preset restaurado veio com o "more DELAY" e o "more VERB" ligados. Na primeira tentativa os parâmetros estavam nos mínimos, provavelmente porque a troca partiu de outro footswitch (2 → snapshot 5), o que é [hipótese].
 
+## Escritas de IR, configurações e favoritos (2026-11-21, captura `12`)
+
+Ações do usuário no HX Edit: importar um IR e apagá-lo; mudar FS4 Function e voltar; criar um favorito a partir de um bloco e apagá-lo. Tudo nesta seção é [fato] da captura, salvo quando marcado.
+
+| Ação | Comando | Parâmetros | Resposta |
+|---|---|---|---|
+| Importar IR | librarian `0x09` | `{0x70: slot, 0x71: u32, 0x6d: nome, 0x72: 1, 0x73: 3, 0x7b: false, 0x7c: false, 0x7d: 0, 0x6e: 8192 B}`, os mesmos campos que o `0x0c` devolve, mais os dados do `0x0b` | status 1, conclusão no notify |
+| Apagar IR | librarian `0x0f` | `{0x70: slot}` | |
+| Escrever configuração | editor `0x19` | `{0x76: id, 0x77: valor}` | notify `0x16` `{0x76: id, 0x77: valor}` |
+| Selecionar bloco | editor `0x4e` | `{0x62: bloco, 0x1a: 0}` | notify `0x27` `{0x62, 0x1a}` |
+| Pôr um modelo num bloco | editor `0x27` | `{0x62: bloco, 0x63: {0x13: 6, 0x14: corpo do bloco}}` | notify `0x31` `{0x62}` |
+| Salvar bloco como favorito | editor `0x77` | `{0x62: bloco, 0x76: n°, 0x1f: true, 0x6d: nome}` | notify `0x38` |
+| Remover bloco | editor `0x2d` | `{0x62: bloco}` | |
+| Apagar favorito | librarian `0x74` | `{0x76: n°}` | notify `0x3b` `{0x76}` |
+| Carregar preset | editor `0x14` | `{0x6b, 0x6c}` | status 1, conclusão no notify (tipo `0x14`), depois `8 → 0x27 → 4` |
+
+- O notify `0x16`, que chega o tempo todo, é "configuração mudou" `{0x76: id, 0x77: valor}`.
+- IDs: 97, 98 e 99 são FS3, FS4 e FS5 Function (tabela de páginas do HXtra em `m4/settings.md`). O FS4 foi `1 → 2 → 1`; o FS5 não foi escrito.
+- Backup depois das ações, comparado com o das 14:01 (conferência só com leitura):
+  - os 126 presets e os 4 IRs são idênticos; o IR importado e o bloco posto no preset 011 não ficaram;
+  - nos globais, só o ID 28 mudou (10 → 1), e o valor bate com o preset atual (001); [inferência] o ID 28 é o `LastActivePreset` do `.hxb`;
+  - nos 17 favoritos, só um campo mudou: a chave 28 dentro de `0x40` caiu 1 em todos (1..17 → 0..16). Criar e apagar um favorito pelo HX Edit renumera esse campo. Os parâmetros não mudaram.
+- [em aberto] O `0x77` cria um favorito a partir de um bloco do edit buffer. Ainda não conheço um comando que grave um favorito a partir de dados (para a restauração), nem uma escrita em bloco dos globais.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
