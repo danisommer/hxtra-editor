@@ -1,0 +1,31 @@
+# Line 6 / user-owned material: never commit, never publish
+firmware-originals/
+work/
+*.hxf
+*.hxb
+*.hlx
+*.hls
+*.hsb
+*.l6ia
+*.bin
+*.ldr
+*.pcap
+*.pcapng
+*Zone.Identifier
+
+# Generated catalogs (derived from the user's firmware)
+catalog/
+*.catalog.json
+
+# Rust
+target/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
