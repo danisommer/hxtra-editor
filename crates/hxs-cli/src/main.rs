@@ -433,7 +433,8 @@ fn model_notes(m: &Model, style: NameStyle) -> String {
     let renamed = other.filter(|(_, n)| *n != m.display_name(style)).map(|(what, n)| format!("{what}: {n}"));
     let added = (m.hxtra_added == Some(true)).then(|| "added by HXtra".to_owned());
     let channels = m.subcategory.as_deref().filter(|s| matches!(*s, "mono" | "stereo")).map(str::to_owned);
-    match channels.into_iter().chain(renamed).chain(added).collect::<Vec<_>>() {
+    let capture = m.is_capture().then(|| "capture (NAM)".to_owned());
+    match capture.into_iter().chain(channels).chain(renamed).chain(added).collect::<Vec<_>>() {
         notes if notes.is_empty() => String::new(),
         notes => format!("  ({})", notes.join("; ")),
     }
@@ -510,7 +511,7 @@ fn describe_catalog(labels: &Labels, search: Option<&str>) -> Result<()> {
     let needle = search.to_lowercase();
     let names = |m: &Model| [Some(&m.title), m.stock_title.as_ref(), m.real_name.as_ref(), Some(&m.name)].into_iter().flatten().any(|n| n.to_lowercase().contains(&needle));
     for m in c.models.iter().filter(|m| names(m)) {
-        let category = m.category.as_deref().unwrap_or("?");
+        let category = m.shown_category();
         println!("{:4}  {:<24} {category:<12} {:2} params{}", m.preset_id, m.display_name(labels.style), m.params.len(), model_notes(m, labels.style));
     }
     Ok(())

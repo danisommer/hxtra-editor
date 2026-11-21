@@ -35,6 +35,12 @@ NAME_LEN = 0x11
 ITEM_LEN = 48
 TABLE2_ROW = 44
 TYPES = {1: "bool", 2: "int", 3: "float", 6: "data"}
+# What a model really is when its firmware category says otherwise, and its parameters' roles.
+# HXtra's NAM A2 Lite sits in the distortion category; its Model knob picks the User IR slot
+# that holds the converted .nam capture (HXtra tools/effects.py), 1..128.
+ROLES = {
+    "HD2_DistNAMLite": ("capture", {"Model": "capture_slot"}),
+}
 # The .hxf HEAD chunk's data starts at byte 20; its third word is the device ID (0x210006, the HX Stomp).
 HEAD_DEVICE_ID = 20 + 8
 
@@ -185,6 +191,14 @@ def mark_hxtra(models, stock_models):
             p["hxtra_added"] = stock is not None and p["name"] not in stock_params
 
 
+def mark_roles(models):
+    for m in models:
+        role, param_roles = ROLES.get(m["name"], (None, {}))
+        m["role"] = role
+        for p in m["params"]:
+            p["role"] = param_roles.get(p["name"]) or param_roles.get(p["title"])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("hxtra_tools")
@@ -208,6 +222,7 @@ def main(argv=None):
     if a.stock:
         stock_models, _, _ = catalog(pa, a.stock, real)
         mark_hxtra(models, stock_models)
+    mark_roles(models)
     head = open(a.firmware, "rb").read(64)
     is_hxf = head[:4] == b"FORM" and head[12:16] == b"HEAD"
     device_id = struct.unpack_from(">I", head, HEAD_DEVICE_ID)[0] if is_hxf else (known[1] if known else None)

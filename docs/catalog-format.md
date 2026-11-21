@@ -53,6 +53,7 @@ The editor compares `firmware` with the version in the unit's preset files.
 | `legacy` | `true` for Legacy models, else `null` |
 | `dsp_cost` | the firmware's DSP cost figure |
 | `hxtra_added` | `true` for a model HXtra adds (NAM A2 Lite, Metronome); `false` for stock models; absent when the stock file was not given |
+| `role` | what the model really is when its category says otherwise: `"capture"` for HXtra's NAM A2 Lite (filed under distortion); else `null` or absent |
 | `params` | the parameters, in the order a preset stores their values (below) |
 
 ### `models[].params[]`
@@ -70,6 +71,7 @@ The editor compares `firmware` with the version in the unit's preset files.
 | `visible` | `false` for hidden helpers (tempo-sync companions, internal data) |
 | `sync` | `true` for a time that can follow the tempo |
 | `hxtra_added` | `true` for a parameter HXtra adds to a stock model (the FX Loop gate, the GR meter's knobs, the Noise Gate's sidechain) |
+| `role` | `"capture_slot"`: the value is the User IR slot (1..128, as a float) holding the capture; else `null` or absent |
 
 ### `browser[]`
 

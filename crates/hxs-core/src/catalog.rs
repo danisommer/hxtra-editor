@@ -56,8 +56,13 @@ pub struct Model {
     pub legacy: Option<bool>,
     pub dsp_cost: Option<u64>,
     pub hxtra_added: Option<bool>,
+    #[serde(default)]
+    pub role: Option<String>,
     pub params: Vec<Param>,
 }
+
+pub const ROLE_CAPTURE: &str = "capture";
+pub const ROLE_CAPTURE_SLOT: &str = "capture_slot";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Param {
@@ -78,6 +83,8 @@ pub struct Param {
     #[serde(default)]
     pub sync: bool,
     pub hxtra_added: Option<bool>,
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -179,6 +186,18 @@ impl Model {
         }
     }
 
+    pub fn is_capture(&self) -> bool {
+        self.role.as_deref() == Some(ROLE_CAPTURE)
+    }
+
+    /// The category to file the model under: `capture` for captures, else the firmware's.
+    pub fn shown_category(&self) -> &str {
+        match self.is_capture() {
+            true => ROLE_CAPTURE,
+            false => self.category.as_deref().unwrap_or("?"),
+        }
+    }
+
     pub fn param(&self, index: usize) -> Option<&Param> {
         self.params.iter().find(|p| p.index == index)
     }
@@ -237,6 +256,7 @@ impl Param {
     pub fn format(&self, v: &Value) -> String {
         let number = v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)).or_else(|| v.as_u64().map(|u| u as f64));
         match (self.kind, number, v.as_bool()) {
+            (_, Some(n), _) if self.role.as_deref() == Some(ROLE_CAPTURE_SLOT) => format!("capture in IR slot {n:.0}"),
             (_, _, Some(b)) => on_off(b),
             (ParamKind::Bool, Some(n), _) => on_off(n != 0.0),
             (ParamKind::List | ParamKind::Int, Some(n), _) => {
