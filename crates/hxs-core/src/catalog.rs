@@ -140,17 +140,19 @@ impl Catalog {
         Self::parse(&bytes).map_err(|e| Error::Catalog(format!("{}: {e}", path.display())))
     }
 
-    /// The first catalog found: `explicit`, then `HXS_CATALOG`, then next to the executable,
-    /// then the user's data folder. `None` when there is none.
-    pub fn locate(explicit: Option<&Path>) -> Option<PathBuf> {
-        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
-        explicit
-            .map(Path::to_path_buf)
-            .into_iter()
-            .chain(std::env::var_os(ENV_VAR).map(PathBuf::from))
-            .chain(exe_dir.map(|d| d.join(FILE_NAME)))
-            .chain(data_folder().map(|d| d.join(FILE_NAME)))
-            .find(|p| p.is_file())
+    /// The catalog to use and where it came from: `explicit`, else `HXS_CATALOG` (either must
+    /// load), else the first file found next to the executable or in the user's data folder.
+    /// `Ok(None)` when no catalog is set up.
+    pub fn find(explicit: Option<&Path>) -> Result<Option<(PathBuf, Self)>> {
+        let chosen = explicit.map(Path::to_path_buf).or_else(|| std::env::var_os(ENV_VAR).map(PathBuf::from));
+        let path = match chosen {
+            Some(p) => Some(p),
+            None => {
+                let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+                [exe_dir, data_folder()].into_iter().flatten().map(|d| d.join(FILE_NAME)).find(|p| p.is_file())
+            }
+        };
+        path.map(|p| Self::load(&p).map(|c| (p, c))).transpose()
     }
 
     pub fn model(&self, preset_id: u64) -> Option<&Model> {

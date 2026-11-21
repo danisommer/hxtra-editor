@@ -1,17 +1,18 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use hxs_core::backup;
+use hxs_core::catalog::{self, Catalog, Model, NameStyle};
 use hxs_core::device::{DeviceHandle, Event, Options, snapshot_number};
 use hxs_core::notify::Notification;
 use hxs_core::globals::Globals;
-use hxs_core::preset::PresetFile;
+use hxs_core::preset::{Block, PresetFile};
 use rmpv::Value;
 use hxs_core::restore;
 use hxs_core::snapshot::{self, Bank};
@@ -25,12 +26,46 @@ struct Cli {
     /// Seconds to wait for each reply from the device.
     #[arg(long, default_value_t = 5.0, global = true)]
     timeout: f64,
+    /// The model catalog (default: $HXS_CATALOG, else hxs-catalog.json next to hxs or in the data folder).
+    #[arg(long, global = true)]
+    catalog: Option<PathBuf>,
+    /// Which model names to print: as on the unit, Line 6's, or HXtra's real-world names.
+    #[arg(long, value_enum, default_value_t = NameArg::Unit, global = true)]
+    names: NameArg,
     #[command(subcommand)]
     command: Command,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum NameArg {
+    Unit,
+    Line6,
+    Real,
+}
+
+impl From<NameArg> for NameStyle {
+    fn from(a: NameArg) -> Self {
+        match a {
+            NameArg::Unit => NameStyle::Unit,
+            NameArg::Line6 => NameStyle::Line6,
+            NameArg::Real => NameStyle::Real,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Show a stored preset's blocks with model and parameter names (from the catalog) and its snapshots.
+    Show {
+        slot: usize,
+        #[arg(long, default_value_t = 0)]
+        setlist: u64,
+        /// Also print the parameters the unit does not show (tempo-sync divisions and the like).
+        #[arg(long)]
+        hidden: bool,
+    },
+    /// Describe the model catalog in use, or list the models whose names contain SEARCH.
+    Catalog { search: Option<String> },
     /// Show the device, its setlists and the current preset.
     Info,
     /// List the presets of a setlist in slot order.
@@ -45,7 +80,12 @@ enum Command {
         setlist: u64,
     },
     /// Describe a preset file from a backup (no device needed).
-    Inspect { file: PathBuf },
+    Inspect {
+        file: PathBuf,
+        /// Also print the parameters the unit does not show.
+        #[arg(long)]
+        hidden: bool,
+    },
     /// Write a preset file from a backup into one slot (a dry run unless --yes), then read it back.
     RestorePreset {
         file: PathBuf,
@@ -103,15 +143,18 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let timeout = Duration::from_secs_f64(cli.timeout);
+    let labels = || Labels::load(cli.catalog.as_deref(), cli.names.into());
     match cli.command {
         Command::Info => info(timeout),
         Command::Presets { setlist } => presets(timeout, setlist),
+        Command::Show { slot, setlist, hidden } => show(timeout, slot, setlist, labels()?, hidden),
+        Command::Catalog { ref search } => describe_catalog(&labels()?, search.as_deref()),
         Command::Backup { dir, setlist } => run_backup(timeout, &dir, setlist),
-        Command::Inspect { file } => inspect(&file),
+        Command::Inspect { ref file, hidden } => inspect(file, labels()?, hidden),
         Command::RestorePreset { file, slot, name, setlist, yes } => restore_preset(timeout, &file, slot, &name, setlist, yes),
         Command::RestoreGlobals { path, yes } => restore_globals(timeout, &path, yes),
         Command::Restore { dir, yes } => restore_all(timeout, &dir, yes),
-        Command::Monitor { seconds, all, no_input, midi_channel } => monitor(timeout, seconds, all, no_input, midi_channel - 1),
+        Command::Monitor { seconds, all, no_input, midi_channel } => monitor(timeout, labels()?, seconds, all, no_input, midi_channel - 1),
         Command::DeleteIr { number, yes } => delete_ir(timeout, number, yes),
     }
 }
@@ -137,10 +180,13 @@ fn delete_ir(timeout: Duration, number: u64, yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool, midi_channel: u8) -> Result<()> {
+fn monitor(timeout: Duration, labels: Labels, seconds: u64, all: bool, no_input: bool, midi_channel: u8) -> Result<()> {
     let (handle, events) = DeviceHandle::usb(timeout, Options { midi_channel });
     let snapshot = handle.connect().wait().context("connecting to the HX Stomp")?;
     let globals = Globals::parse(snapshot.globals.clone())?;
+    let edit = PresetFile::parse(snapshot.edit_buffer.clone()).context("reading the edit buffer")?;
+    let labels = Arc::new(labels.for_firmware(edit.device_meta().map(|m| m.firmware)));
+    let mut blocks = edit.blocks()?;
     let start = Instant::now();
     println!(
         "connected (USB {:04x}): setlist {} slot {:03} \"{}\"{}, {} presets",
@@ -154,8 +200,8 @@ fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool, midi_chan
     let quit = Arc::new(AtomicBool::new(false));
     if !no_input {
         println!("commands: {MONITOR_COMMANDS}");
-        let (handle, quit, setlist) = (handle.clone(), quit.clone(), snapshot.current.setlist);
-        thread::spawn(move || read_commands(&handle, &globals, setlist, &quit));
+        let (handle, quit, setlist, labels) = (handle.clone(), quit.clone(), snapshot.current.setlist, labels.clone());
+        thread::spawn(move || read_commands(&handle, &globals, &labels, setlist, &quit));
     }
     let deadline = (seconds > 0).then(|| start + Duration::from_secs(seconds));
     let mut limiter = RateLimit::new(all);
@@ -169,7 +215,11 @@ fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool, midi_chan
                 }
             }
             Event::PresetLoaded { current, edit_buffer } => {
-                println!("{t:9.3}  preset loaded: setlist {} slot {:03} \"{}\" ({} bytes)", current.setlist, current.slot, current.name, edit_buffer.len())
+                println!("{t:9.3}  preset loaded: setlist {} slot {:03} \"{}\" ({} bytes)", current.setlist, current.slot, current.name, edit_buffer.len());
+                match PresetFile::parse(edit_buffer.clone()).and_then(|p| p.blocks()) {
+                    Ok(b) => blocks = b,
+                    Err(e) => println!("{t:9.3}  problem: reading the new edit buffer's blocks: {e}"),
+                }
             }
             Event::PresetRenamed { setlist, slot, name } => println!("{t:9.3}  preset renamed: setlist {setlist} slot {slot:03} \"{name}\""),
             Event::Notified(Notification::Unknown { kind, note }) => {
@@ -179,7 +229,15 @@ fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool, midi_chan
             }
             Event::Notified(Notification::ParameterChanged { block, path, index, value }) => {
                 if limiter.allows(format!("parameter {block}/{path}/{index}")) {
-                    println!("{t:9.3}  parameter block {block} path {path} index {index} = {}", value_text(value));
+                    let named = (*path == 0)
+                        .then(|| usize::try_from(*block).ok())
+                        .flatten()
+                        .and_then(|b| blocks.iter().find(|x| x.position == b))
+                        .and_then(|b| labels.param_text(b, usize::try_from(*index).ok()?, value));
+                    match named {
+                        Some(text) => println!("{t:9.3}  parameter {text}"),
+                        None => println!("{t:9.3}  parameter block {block} path {path} index {index} = {}", value_text(value)),
+                    }
                 }
             }
             Event::Notified(n) => println!("{t:9.3}  {n:?}"),
@@ -241,7 +299,7 @@ fn signature(kind: Option<u64>, note: &Value) -> String {
     format!("kind {}/{}/{}", kind.map_or("?".into(), |k| format!("{k:#04x}")), field(0x44), field(0x79))
 }
 
-fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &AtomicBool) {
+fn read_commands(handle: &DeviceHandle, globals: &Globals, labels: &Labels, setlist: u64, quit: &AtomicBool) {
     for line in std::io::stdin().lines() {
         let Ok(line) = line else { break };
         let line = line.trim_start_matches('\u{feff}');
@@ -257,9 +315,10 @@ fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &
                 .map_err(anyhow::Error::from)
                 .and_then(|id| typed_value(globals, id, value).map(|v| (id, v)))
                 .and_then(|(id, v)| Ok(handle.set_setting(id, v).wait()?)),
-            ["param", block, index, value] => (|| {
-                let v = literal_value(value)?;
-                Ok(handle.set_parameter(block.parse()?, 0, index.parse()?, v).wait()?)
+            ["param", block, param, value] => (|| {
+                let block: u64 = block.parse().context("BLOCK is a grid position (0..19)")?;
+                let (index, v) = parameter_value(handle, labels, block, param, value)?;
+                Ok(handle.set_parameter(block, 0, index, v).wait()?)
             })(),
             ["block", block, state @ ("on" | "off")] => {
                 block.parse().map_err(anyhow::Error::from).and_then(|b| Ok(handle.set_block_enabled(b, *state == "on").wait()?))
@@ -283,8 +342,173 @@ fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &
     }
 }
 
-const MONITOR_COMMANDS: &str =
-    "select SLOT | set ID VALUE | param BLOCK INDEX VALUE (0.5 float, 3 int, true bool) | block BLOCK on|off | snapshot 1-6 (MIDI CC 69) | save (stores the current preset in its slot) | quit";
+const MONITOR_COMMANDS: &str = "select SLOT | set ID VALUE | param BLOCK PARAM VALUE (PARAM an index or a name; VALUE in the catalog's units, e.g. 0.074 s or a list label; without a catalog 0.5 float, 3 int, true bool) | block BLOCK on|off | snapshot 1-6 (MIDI CC 69) | save (stores the current preset in its slot) | quit";
+
+/// The parameter index and typed value for `param`: from the catalog and the model in that
+/// block of the current edit buffer, else by how the value is written.
+fn parameter_value(handle: &DeviceHandle, labels: &Labels, block: u64, param: &str, value: &str) -> Result<(u64, Value)> {
+    let Some(catalog) = &labels.catalog else {
+        let index = param.parse().context("without a catalog PARAM is an index")?;
+        return Ok((index, literal_value(value)?));
+    };
+    let edit = PresetFile::parse(handle.state().wait()?.edit_buffer)?;
+    let found = edit.blocks()?.into_iter().find(|b| b.position as u64 == block);
+    let b = found.with_context(|| format!("no block at position {block} in the current preset"))?;
+    let model = catalog.model(b.preset_id).with_context(|| format!("model {} is not in the catalog", b.preset_id))?;
+    let p = param
+        .parse()
+        .ok()
+        .and_then(|i| model.param(i))
+        .or_else(|| model.param_named(param))
+        .with_context(|| format!("{} has no parameter {param} (it has {})", model.display_name(labels.style), parameter_names(model)))?;
+    let v = p.value_for(value)?;
+    println!("-> {} / {} = {}", model.display_name(labels.style), p.title, p.format(&v));
+    Ok((p.index as u64, v))
+}
+
+fn parameter_names(m: &Model) -> String {
+    m.params.iter().filter(|p| p.visible).map(|p| format!("{} {}", p.index, p.title)).collect::<Vec<_>>().join(", ")
+}
+
+/// The catalog in use (if any) and the name style commands print with.
+struct Labels {
+    catalog: Option<Catalog>,
+    style: NameStyle,
+}
+
+impl Labels {
+    fn load(path: Option<&Path>, style: NameStyle) -> Result<Self> {
+        let found = Catalog::find(path)?;
+        let catalog = found.map(|(p, c)| {
+            eprintln!("catalog: {} ({} models)", p.display(), c.models.len());
+            c
+        });
+        Ok(Self { catalog, style })
+    }
+
+    /// Drop a catalog made for another firmware than the unit's, saying so.
+    fn for_firmware(self, firmware: Option<u64>) -> Self {
+        let problem = match (&self.catalog, firmware) {
+            (Some(c), Some(f)) => c.check_firmware(f).err(),
+            _ => None,
+        };
+        match problem {
+            Some(e) => {
+                eprintln!("not using the catalog: {e}");
+                Self { catalog: None, ..self }
+            }
+            None => self,
+        }
+    }
+
+    fn model(&self, preset_id: u64) -> Option<&Model> {
+        self.catalog.as_ref()?.model(preset_id)
+    }
+
+    fn model_name(&self, preset_id: u64) -> String {
+        match self.model(preset_id) {
+            Some(m) => m.display_name(self.style).to_owned(),
+            None => format!("model {preset_id}"),
+        }
+    }
+
+    /// `A4 Deluxe Comp / Attack = 74.0 ms` for a value of a block's parameter, if the catalog knows it.
+    fn param_text(&self, b: &Block, index: usize, value: &Value) -> Option<String> {
+        let m = self.model(b.preset_id)?;
+        let p = m.param(index)?;
+        Some(format!("{} {} / {} = {}", position_label(b.position), m.display_name(self.style), p.title, p.format(value)))
+    }
+}
+
+fn position_label(position: usize) -> String {
+    snapshot::slot_label(position).unwrap_or_else(|| format!("#{position}"))
+}
+
+/// What else to know about a model's name: Line 6's name when another is shown, and HXtra's additions.
+fn model_notes(m: &Model, style: NameStyle) -> String {
+    let other = match style {
+        NameStyle::Line6 => Some(("on the unit", m.title.as_str())),
+        NameStyle::Unit | NameStyle::Real => m.stock_title.as_deref().map(|s| ("Line 6", s)),
+    };
+    let renamed = other.filter(|(_, n)| *n != m.display_name(style)).map(|(what, n)| format!("{what}: {n}"));
+    let added = (m.hxtra_added == Some(true)).then(|| "added by HXtra".to_owned());
+    let channels = m.subcategory.as_deref().filter(|s| matches!(*s, "mono" | "stereo")).map(str::to_owned);
+    match channels.into_iter().chain(renamed).chain(added).collect::<Vec<_>>() {
+        notes if notes.is_empty() => String::new(),
+        notes => format!("  ({})", notes.join("; ")),
+    }
+}
+
+fn print_blocks(p: &PresetFile, labels: &Labels, hidden: bool) -> Result<()> {
+    match labels.catalog {
+        Some(_) => println!("\nblocks"),
+        None => println!("\nblocks (no catalog: model and parameter numbers only, see `hxs catalog`)"),
+    }
+    for b in p.blocks()? {
+        let model = labels.model(b.preset_id);
+        let notes = model.map_or(String::new(), |m| model_notes(m, labels.style));
+        println!("  {:<3} {:<24} {}{notes}", position_label(b.position), labels.model_name(b.preset_id), if b.enabled { "on" } else { "off" });
+        print_block_values(&b, model, hidden);
+    }
+    Ok(())
+}
+
+fn print_block_values(b: &Block, model: Option<&Model>, hidden: bool) {
+    for (i, v) in b.params.iter().enumerate() {
+        match model.and_then(|m| m.param(i)) {
+            Some(p) if p.visible || hidden => {
+                println!("        {:<14} {}{}", p.title, p.format(v), if p.hxtra_added == Some(true) { "  (HXtra)" } else { "" })
+            }
+            Some(_) => {}
+            None => println!("        [{i}] {}", value_text(v)),
+        }
+    }
+    let missing: Vec<&str> = model
+        .map(|m| m.params.iter().filter(|p| p.index >= b.params.len() && (p.visible || hidden)).map(|p| p.title.as_str()).collect())
+        .unwrap_or_default();
+    if !missing.is_empty() {
+        println!("        not in this preset (saved before they existed?): {}", missing.join(", "));
+    }
+    if !b.extras.is_empty() {
+        println!("        block values after the model's: {}", b.extras.iter().map(value_text).collect::<Vec<_>>().join(", "));
+    }
+    if let Some(h) = &b.ir_hash {
+        println!("        IR {}", h.get(..16).unwrap_or(h));
+    }
+}
+
+fn show(timeout: Duration, slot: usize, setlist: u64, labels: Labels, hidden: bool) -> Result<()> {
+    let mut stomp = connect(timeout)?;
+    let list = stomp.preset_list(setlist)?;
+    let entry = list.get(slot).with_context(|| format!("setlist {setlist} has slots 000..{:03}", list.len().saturating_sub(1)))?;
+    let p = PresetFile::parse(stomp.preset_file(setlist, slot)?)?;
+    let labels = labels.for_firmware(p.device_meta().map(|m| m.firmware));
+    println!("setlist {setlist} slot {slot:03} \"{}\"", entry.name);
+    print_blocks(&p, &labels, hidden)?;
+    print_snapshots(&p)
+}
+
+fn describe_catalog(labels: &Labels, search: Option<&str>) -> Result<()> {
+    let c = labels.catalog.as_ref().with_context(|| {
+        let data = catalog::data_folder().map_or("the data folder".into(), |d| d.display().to_string());
+        format!("no catalog: pass --catalog, set {}, or put {} next to hxs or in {data}", catalog::ENV_VAR, catalog::FILE_NAME)
+    })?;
+    let s = &c.source;
+    let firmware = s.firmware.map_or("?".into(), |f| format!("{:x}.{:x}.{:x}", f >> 24, (f >> 16) & 0xFF, (f >> 8) & 0xFF));
+    println!("{} firmware {firmware}, file md5 {}{}", s.product.as_deref().unwrap_or("?"), s.md5, s.stock_md5.as_ref().map_or(String::new(), |m| format!(" (stock md5 {m})")));
+    let added = c.models.iter().filter(|m| m.hxtra_added == Some(true)).count();
+    let added_params = c.models.iter().flat_map(|m| &m.params).filter(|p| p.hxtra_added == Some(true)).count();
+    let renamed = c.models.iter().filter(|m| m.stock_title.as_ref().is_some_and(|t| *t != m.title)).count();
+    println!("{} models ({added} added by HXtra, {added_params} parameters added, {renamed} renamed), {} browser folders", c.models.len(), c.browser.len());
+    let Some(search) = search else { return Ok(()) };
+    let needle = search.to_lowercase();
+    let names = |m: &Model| [Some(&m.title), m.stock_title.as_ref(), m.real_name.as_ref(), Some(&m.name)].into_iter().flatten().any(|n| n.to_lowercase().contains(&needle));
+    for m in c.models.iter().filter(|m| names(m)) {
+        let category = m.category.as_deref().unwrap_or("?");
+        println!("{:4}  {:<24} {category:<12} {:2} params{}", m.preset_id, m.display_name(labels.style), m.params.len(), model_notes(m, labels.style));
+    }
+    Ok(())
+}
 
 /// A parameter value typed by how it is written: with a point a float, without one an int,
 /// `true`/`false` a bool (the unit drops a preset given a value of the wrong type).
@@ -507,9 +731,10 @@ fn run_backup(timeout: Duration, dir: &std::path::Path, setlist: u64) -> Result<
     Ok(())
 }
 
-fn inspect(file: &std::path::Path) -> Result<()> {
+fn inspect(file: &std::path::Path, labels: Labels, hidden: bool) -> Result<()> {
     let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let p = PresetFile::parse(bytes)?;
+    let labels = labels.for_firmware(p.device_meta().map(|m| m.firmware));
     println!("{}: {} bytes, sha256 {}", file.display(), p.bytes().len(), backup::sha256_hex(p.bytes()));
     if let Some(m) = p.device_meta() {
         println!("made by  {} firmware {} ({})", m.product, m.firmware_text(), m.build);
@@ -524,6 +749,7 @@ fn inspect(file: &std::path::Path) -> Result<()> {
     if p.trailing() > 0 {
         println!("warning: {} bytes after the section map", p.trailing());
     }
+    print_blocks(&p, &labels, hidden)?;
     print_snapshots(&p)
 }
 

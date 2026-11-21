@@ -30,7 +30,7 @@ Tags: **[fato]** verificado aqui (comando rodado ou arquivo lido), **[HXtra]** a
 - [fato] Nos parâmetros de tipo 2, mínimo/máximo/padrão são inteiros guardados em bits de float (por isso aparecem como 1e-45).
 - [fato] O ID que o preset guarda (bloco, chave 25) é o `preset_id` da Table 1 da parte 0, **não** o `model_id` da parte 3. O mapa nome→`preset_id` sai da Table 1 (823 linhas no stock, 824 no HXtra). Conferido contra o edit buffer real (21 = Essex A30, 124 = Deluxe Comp Stereo, 555 = NAM A2 Lite).
 - [fato] Os nomes de parâmetro da parte 3 (`ChVol`, `BiasX`...) são as mesmas chaves do JSON do HX Edit (.hlx/.hxb).
-- [ainda não extraído] Pastas e ordem do navegador de modelos (parte 0, listas do browser), ícones (partes 7 e 8).
+- [fato] Pastas e ordem do navegador de modelos (parte 0, listas do browser): extraídas para o catálogo (`tools/catalog/hxs_catalog.py`, formato em `catalog-format.md`). [ainda não extraído] Ícones (partes 7 e 8).
 
 ## O que o HXtra v1.2.1 muda (base da camada pública)
 
@@ -250,6 +250,15 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [hipótese refutada] "Carregar um preset com modelo de Variax (seção 5, chave 45 = `15` nos 115 "Empty", `0` nos 11 AC30) regrava a 113": com a 113 restaurada como int `0`, `select 12` ("Empty") e depois `select 0` (AC30) não a mudaram.
 - [fato] Nas três vezes em que a 113 virou float `1.0`, o último passo antes da verificação foi **subir o arquivo "Empty" (librarian `0x08`) para o slot carregado**, que o aparelho recarrega em seguida. Subir o "SAVE TEST" para o slot carregado não a mudou, e carregar o "Empty" pelo `0x14` também não.
 - [hipótese] A recarga depois de um upload aplica configurações do preset (o Variax?) que uma carga comum não aplica. Teste possível: subir o "Empty" para um slot que **não** é o atual e depois carregá-lo; e subir para o slot atual um preset com a chave 45 = 0.
+
+## Blocos do preset contra o catálogo (2026-11-21, os 126 presets do backup `session2`, 84 blocos)
+
+- [fato] Cada célula de processamento da grade (`preset[0][22]`, tipo `19 = 6`) tem o corpo em `20`: `24 → {23: false, 25: preset_id, 26: -1}`, `9` (1, 8 ou 9; papel desconhecido), `10` ligado/desligado, `11 → {2: total de valores, 3: parâmetros do modelo, 4: [valores]}` e, nos blocos de IR, `27` no lugar de `12`: um hash de 64 dígitos hexadecimais terminado em NUL. [inferência] Identifica o arquivo de IR (SHA-256?). Nos outros blocos, `12` vale `{2: 0, 3: 0, 4: []}`, e às vezes falta.
+- [fato] Os primeiros `3` valores são os parâmetros do modelo, **na ordem dos índices do catálogo** (por slot). Ex.: Deluxe Comp do 010 = Threshold −27,5, Ratio 0, Attack 0,027...; o bloco 4, parâmetro 2 do `0x1e` é esse Attack.
+- [fato] Presets gravados antes do HXtra guardam só os parâmetros que o modelo tinha: o FX Loop com 3 (o catálogo HXtra tem 6: Gate, Threshold, Decay) e o Deluxe Comp com 7 (o catálogo tem 10: Mtr Position/Direction/Size). Os que faltam são exatamente os que o HXtra adiciona. [hipótese] Ao carregar, o aparelho usa o padrão para eles.
+- [fato] Quando `2 > 3`, sobra exatamente um bool depois dos parâmetros, e só em delay, reverb e FX loop. [hipótese] É o **Trails** do bloco.
+- [fato] No Echoplex EP-3 (preset_id 94), o aparelho guarda 10 parâmetros, mas o catálogo tem 11: o último, "Dry Thru" (slot 12, oculto), nunca aparece nos presets.
+- [fato] Os 126 presets dizem firmware `0x03800000` na seção 7, inclusive os que têm o FX Loop "pré-HXtra". [inferência] O aparelho carimba a versão atual ao serializar o arquivo, então serve para conferir o catálogo contra o aparelho.
 
 ## Em aberto
 

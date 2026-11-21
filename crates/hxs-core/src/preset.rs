@@ -19,6 +19,7 @@ pub const SECTION_BLOCKS: u64 = 0;
 const BLOCK_GRID_KEY: u64 = 22;
 const BLOCK_TYPE_KEY: u64 = 19;
 const BLOCK_TYPE_PROCESSING: u64 = 6;
+const BLOCK_BODY_KEY: u64 = 20;
 pub const SECTION_BANK_B: u64 = 0x64;
 pub const BANK_B_MAGIC: &[u8] = b"HX6B";
 
@@ -26,6 +27,53 @@ mod meta_key {
     pub const VERSION: u64 = 0x23;
     pub const PRODUCT: u64 = 0x24;
     pub const BUILD: u64 = 0x25;
+}
+
+mod block_key {
+    pub const ENABLED: u64 = 10;
+    pub const VALUES: u64 = 11;
+    pub const MODEL: u64 = 24;
+    pub const MODEL_ID: u64 = 25;
+    pub const IR_HASH: u64 = 27;
+    pub const PARAM_COUNT: u64 = 3;
+    pub const VALUE_LIST: u64 = 4;
+}
+
+/// A processing block of the grid. `params` are the model's values in catalog order (a preset
+/// saved before HXtra lacks the parameters HXtra adds); `extras` follow them on delays, reverbs
+/// and FX loops (one bool, Trails by hypothesis).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block {
+    pub position: usize,
+    pub preset_id: u64,
+    pub enabled: bool,
+    pub params: Vec<Value>,
+    pub extras: Vec<Value>,
+    pub ir_hash: Option<String>,
+}
+
+impl Block {
+    fn parse(position: usize, body: &Value) -> Result<Self> {
+        let bad = |what: &str| Error::Preset(format!("block at position {position}: {what}"));
+        let values = msg::get(body, block_key::VALUES).ok_or_else(|| bad("no values"))?;
+        let list = msg::get(values, block_key::VALUE_LIST).and_then(Value::as_array).ok_or_else(|| bad("no value list"))?;
+        let count = msg::get(values, block_key::PARAM_COUNT).and_then(Value::as_u64).ok_or_else(|| bad("no parameter count"))? as usize;
+        let (params, extras) = match count <= list.len() {
+            true => list.split_at(count),
+            false => return Err(bad(&format!("{count} parameters but {} values", list.len()))),
+        };
+        Ok(Self {
+            position,
+            preset_id: msg::get(body, block_key::MODEL)
+                .and_then(|m| msg::get(m, block_key::MODEL_ID))
+                .and_then(Value::as_u64)
+                .ok_or_else(|| bad("no model id"))?,
+            enabled: msg::get(body, block_key::ENABLED).and_then(Value::as_bool).ok_or_else(|| bad("no on/off state"))?,
+            params: params.to_vec(),
+            extras: extras.to_vec(),
+            ir_hash: msg::get(body, block_key::IR_HASH).and_then(msg::text),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -113,16 +161,30 @@ impl PresetFile {
 
     /// The block grid positions that hold a processing block (type 6 in `section 0`, key 22).
     pub fn occupied_positions(&self) -> Vec<usize> {
-        let Some(grid) = self.section(SECTION_BLOCKS).and_then(|s| msg::get(&s, BLOCK_GRID_KEY).cloned()) else {
-            return Vec::new();
-        };
-        grid.as_array()
+        self.processing_cells().into_iter().map(|(i, _)| i).collect()
+    }
+
+    /// The processing blocks in grid order.
+    pub fn blocks(&self) -> Result<Vec<Block>> {
+        self.processing_cells()
+            .into_iter()
+            .map(|(i, cell)| {
+                let body = msg::get(&cell, BLOCK_BODY_KEY).ok_or_else(|| Error::Preset(format!("block at position {i} has no body")))?;
+                Block::parse(i, body)
+            })
+            .collect()
+    }
+
+    fn processing_cells(&self) -> Vec<(usize, Value)> {
+        let grid = self.section(SECTION_BLOCKS).and_then(|s| msg::get(&s, BLOCK_GRID_KEY).cloned());
+        grid.as_ref()
+            .and_then(Value::as_array)
             .map(|cells| {
                 cells
                     .iter()
                     .enumerate()
                     .filter(|(_, c)| msg::get(c, BLOCK_TYPE_KEY).and_then(Value::as_u64) == Some(BLOCK_TYPE_PROCESSING))
-                    .map(|(i, _)| i)
+                    .map(|(i, c)| (i, c.clone()))
                     .collect()
             })
             .unwrap_or_default()
@@ -171,6 +233,35 @@ mod tests {
         let m = p.device_meta().unwrap();
         assert_eq!((m.product.as_str(), m.firmware_text().as_str(), m.build.as_str()), ("P33", "3.80.0", "v3.71-32-g1039661"));
         assert_eq!(p.trailing(), 0);
+    }
+
+    fn block_cell(preset_id: u64, enabled: bool, params: u64, values: Vec<Value>) -> Value {
+        let model = msg::int_map(&[(23, Value::from(false)), (25, Value::from(preset_id)), (26, Value::from(-1))]);
+        let list = msg::int_map(&[(2, Value::from(values.len() as u64)), (3, Value::from(params)), (4, Value::Array(values))]);
+        let body = msg::int_map(&[(24, model), (9, Value::from(1)), (10, Value::from(enabled)), (11, list)]);
+        msg::int_map(&[(19, Value::from(6)), (20, body)])
+    }
+
+    #[test]
+    fn reads_blocks_with_model_values_and_extras() {
+        let empty = msg::int_map(&[(19, Value::from(8))]);
+        let reverb = block_cell(636, false, 2, vec![Value::F32(1.5), Value::F32(0.03), Value::from(true)]);
+        let comp = block_cell(124, true, 2, vec![Value::F32(-27.5), Value::from(0)]);
+        let grid = msg::int_map(&[(22, Value::Array(vec![empty.clone(), comp, empty, reverb]))]);
+        let p = PresetFile::parse(file(&[(7, meta()), (0, grid)])).unwrap();
+        let blocks = p.blocks().unwrap();
+        assert_eq!(p.occupied_positions(), vec![1, 3]);
+        assert_eq!((blocks[0].position, blocks[0].preset_id, blocks[0].enabled, blocks[0].params.len()), (1, 124, true, 2));
+        assert!(blocks[0].extras.is_empty());
+        assert_eq!((blocks[1].preset_id, blocks[1].enabled, blocks[1].extras.clone()), (636, false, vec![Value::from(true)]));
+    }
+
+    #[test]
+    fn a_block_claiming_more_parameters_than_values_is_an_error() {
+        let bad = block_cell(124, true, 3, vec![Value::F32(-27.5)]);
+        let grid = msg::int_map(&[(22, Value::Array(vec![bad]))]);
+        let p = PresetFile::parse(file(&[(7, meta()), (0, grid)])).unwrap();
+        assert!(matches!(p.blocks(), Err(Error::Preset(_))));
     }
 
     #[test]

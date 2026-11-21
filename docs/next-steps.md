@@ -20,8 +20,11 @@ Ordem sugerida, cada item com captura ou teste no aparelho antes do código:
 
 ## Etapa 4: catálogo de modelos
 
-- Gerar o catálogo a partir do `.hxf` do usuário (ver `scripts/dump_catalog.py`), em JSON versionado com o MD5 do firmware, e carregá-lo no app.
-- Com ele: nomes no `inspect` (ex.: "Decay do Dynamic Plate"), tipos corretos para o set parameter, e os User Model Defaults.
+- ~~Formato (`catalog-format.md`) e extrator (`tools/catalog/hxs_catalog.py`, o mesmo que o site do HXtra rodaria no Pyodide)~~ (feito; rodado localmente com o firmware stock e o modificado).
+- ~~Carregar no app (`catalog.rs`: `--catalog`, `HXS_CATALOG`, ao lado do executável, `%APPDATA%\hxtra-editor`), conferindo o firmware~~ (feito).
+- ~~Nomes no `inspect`, `hxs show SLOT`, `hxs catalog [busca]`, nomes reais/Line 6 (`--names`), eventos de parâmetro com nome, e `param` do monitor tipado pelo catálogo~~ (feito; o `param` tipado ainda precisa de um teste no aparelho).
+- Falta: exibição de pan, blend, posição de microfone e afinação (hoje número cru, até confirmar como o aparelho mostra); confirmar o Trails; User Model Defaults.
+- Limite conhecido: o monitor só relê o edit buffer quando o preset é carregado; se o modelo de um bloco mudar no aparelho, o `param` usa o modelo antigo até a próxima carga.
 
 ## Depois
 
