@@ -195,7 +195,8 @@ impl Model {
 impl Param {
     /// `text` as this parameter's value, in its type and range: a number, or a list label.
     pub fn value_for(&self, text: &str) -> Result<Value> {
-        let out_of_range = |v: f64| Error::Catalog(format!("{} takes {}..{}, not {v}", self.title, self.min, self.max));
+        let shown = |v: f64| self.format(&Value::from(v));
+        let out_of_range = |v: f64| Error::Catalog(format!("{} takes {}..{}, not {}", self.title, shown(self.min), shown(self.max), shown(v)));
         match self.kind {
             ParamKind::Float => {
                 let v: f64 = text.parse().map_err(|_| Error::Catalog(format!("{} takes a number, not {text}", self.title)))?;
@@ -324,7 +325,8 @@ mod tests {
         let c = Catalog::parse(SAMPLE.as_bytes()).unwrap();
         let m = c.model(124).unwrap();
         assert_eq!(m.param(2).unwrap().value_for("0.074").unwrap(), Value::F32(0.074));
-        assert!(m.param(2).unwrap().value_for("0.5").is_err(), "above 0.2");
+        let above = m.param(2).unwrap().value_for("0.5").unwrap_err().to_string();
+        assert_eq!(above, "catalog: Attack takes 0.1 ms..200.0 ms, not 500.0 ms");
         assert_eq!(m.param(1).unwrap().value_for("3:1").unwrap(), Value::from(1));
         assert_eq!(m.param(1).unwrap().value_for("2").unwrap(), Value::from(2));
         assert!(m.param(1).unwrap().value_for("9").is_err());

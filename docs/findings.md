@@ -260,6 +260,9 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [fato] No Echoplex EP-3 (preset_id 94), o aparelho guarda 10 parâmetros, mas o catálogo tem 11: o último, "Dry Thru" (slot 12, oculto), nunca aparece nos presets.
 - [fato] Os 126 presets dizem firmware `0x03800000` na seção 7, inclusive os que têm o FX Loop "pré-HXtra". [inferência] O aparelho carimba a versão atual ao serializar o arquivo, então serve para conferir o catálogo contra o aparelho.
 
+- [fato] `param` tipado pelo catálogo no monitor (preset 000, sem salvar): `param 4 attack 0.5` e `param 4 tone 1` foram recusados sem enviar nada; `param 4 attack 0.05` virou `0x1e` com float, o aparelho ecoou `A4 Deluxe Comp / Attack = 50.0 ms`, e o `select 0` descartou a edição (preset sem "modificado", Attack gravado ainda 27 ms).
+- [em aberto] O Deluxe Comp do 000 foi gravado com 7 parâmetros. Não se sabe se o bloco carregado tem os 3 do HXtra (padrão ao carregar?) nem o que o aparelho faz com um `0x1e` para os índices 7–9 nesse bloco.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
