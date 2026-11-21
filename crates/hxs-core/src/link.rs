@@ -56,7 +56,9 @@ impl UsbLink {
             .find(|d| d.vendor_id() == VID_LINE6 && matches!(d.product_id(), PID_HX_STOMP | PID_HX_STOMP_XL))
             .ok_or(Error::NotFound)?;
         let product_id = info.product_id();
+        crate::trace!("usb: found {:04x}; opening", product_id);
         let device = info.open().wait()?;
+        crate::trace!("usb: claiming interface {INTERFACE}");
         let iface = device.claim_interface(INTERFACE).wait()?;
         let (addr_out, addr_in, mtu) = bulk_endpoints(&iface)?;
         Ok(Self {

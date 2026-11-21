@@ -12,6 +12,7 @@ use crate::msg;
 mod kind {
     pub const LIBRARIAN_COMPLETION: u64 = 1;
     pub const PRESET_LOADED: u64 = 4;
+    pub const PRESET_SAVED: u64 = 5;
     pub const PRESET_RENAMED: u64 = 6;
     pub const PRESET_LOADING: u64 = 8;
     pub const EDITOR_COMPLETION: u64 = 0x14;
@@ -42,6 +43,7 @@ mod key {
     pub const MOVED_FROM: u64 = 0x4b;
     pub const MOVED_TO: u64 = 0x4c;
     pub const SNAPSHOT: u64 = 0x5c;
+    pub const STAMP: u64 = 0x74;
     pub const SWITCH: u64 = 0x46;
     pub const LIT: u64 = 0x3f;
     pub const COLOR: u64 = 0x42;
@@ -55,6 +57,9 @@ pub enum Notification {
     PresetLoading { setlist: u64, slot: u64 },
     /// The unit has finished loading a preset.
     PresetLoaded { setlist: u64, slot: u64 },
+    /// A preset was stored (on the unit, by HX Edit or this tool); `stamp` is key 0x74,
+    /// a 32-bit value that differs on every save (its meaning is not known).
+    PresetSaved { setlist: u64, slot: u64, stamp: u64 },
     PresetRenamed { setlist: u64, slot: u64, name: String },
     BlockSelected { block: u64 },
     /// A block's model or contents changed (also its bypass).
@@ -93,6 +98,10 @@ pub fn decode(note: &Value) -> Notification {
             .map(|(id, value)| Notification::SettingChanged { id, value: value.clone() }),
         kind::PRESET_LOADING => int(key::SETLIST).zip(int(key::SLOT)).map(|(setlist, slot)| Notification::PresetLoading { setlist, slot }),
         kind::PRESET_LOADED => int(key::SETLIST).zip(int(key::SLOT)).map(|(setlist, slot)| Notification::PresetLoaded { setlist, slot }),
+        kind::PRESET_SAVED => int(key::SETLIST)
+            .zip(int(key::SLOT))
+            .zip(int(key::STAMP))
+            .map(|((setlist, slot), stamp)| Notification::PresetSaved { setlist, slot, stamp }),
         kind::PRESET_RENAMED => int(key::SETLIST)
             .zip(int(key::SLOT))
             .zip(text(key::NAME))
@@ -144,6 +153,8 @@ mod tests {
         assert_eq!(decode(&loaded), Notification::PresetLoaded { setlist: 0, slot: 11 });
         let renamed = event(6, int_map(&[(0x6b, Value::from(0)), (0x6c, Value::from(9)), (0x6d, Value::from("AC30 Clean HXS2\0"))]));
         assert_eq!(decode(&renamed), Notification::PresetRenamed { setlist: 0, slot: 9, name: "AC30 Clean HXS2".into() });
+        let saved = event(5, int_map(&[(0x6b, Value::from(0)), (0x6c, Value::from(11)), (0x74, Value::from(4089953967u64))]));
+        assert_eq!(decode(&saved), Notification::PresetSaved { setlist: 0, slot: 11, stamp: 4089953967 });
         let fav = event(0x38, int_map(&[(0x76, Value::from(0x11)), (0x6d, Value::from("Minotaur"))]));
         assert_eq!(decode(&fav), Notification::FavoriteAdded { index: 0x11, name: "Minotaur".into() });
         let done = int_map(&[(0x69, Value::from(0x14)), (0x6a, int_map(&[(0x66, Value::from(1001)), (0x67, Value::from(0)), (0x68, Value::Nil)]))]);

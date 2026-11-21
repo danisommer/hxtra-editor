@@ -55,8 +55,11 @@ pub struct Session {
 impl Session {
     /// The HX Stomp on USB, after discarding what a previous session left queued.
     pub fn open(timeout: Duration) -> Result<Self> {
+        crate::trace!("usb: opening the device");
         let mut link = UsbLink::open()?;
-        link.purge(PURGE)?;
+        crate::trace!("usb: open; purging");
+        let purged = link.purge(PURGE)?;
+        crate::trace!("usb: purged {purged} bytes");
         Ok(Self::over(Box::new(link), timeout))
     }
 
@@ -94,10 +97,14 @@ impl Session {
             closing: false,
         });
         for attempt in 1..=CONNECT_ATTEMPTS {
+            crate::trace!("channel {:#06x}: open attempt {attempt} (service {})", port.local, port.service);
             match self.select_service(id, port.service) {
                 Ok(()) => return Ok(id),
                 Err(e) if attempt == CONNECT_ATTEMPTS => return Err(e),
-                Err(_) => self.abandon_stream(id),
+                Err(e) => {
+                    crate::trace!("channel {:#06x}: {e}; starting over", port.local);
+                    self.abandon_stream(id)
+                }
             }
         }
         unreachable!("the last attempt returns")
@@ -147,8 +154,10 @@ impl Session {
         ch.seq = ch.seq.wrapping_add(1);
         let body = msg::encode_request_raw(seq, cmd, params);
         let frame = [&msg::header(u16::from(ch.service), body.len())[..], &body].concat();
+        crate::trace!("request service {} cmd {cmd:#04x} seq {seq} ({} bytes)", ch.service, frame.len());
         self.send(id, &frame)?;
         let reply = msg::decode_reply(cmd, &self.read_message(id)?)?;
+        crate::trace!("reply cmd {cmd:#04x} seq {seq}: status {}", reply.status);
         if reply.seq.is_some_and(|s| s != u64::from(seq)) {
             return Err(Error::Protocol(format!("reply to {cmd:#04x} has seq {:?}, expected {seq}", reply.seq)));
         }
@@ -195,6 +204,7 @@ impl Session {
         let end = Instant::now() + CLOSE_DRAIN;
         while Instant::now() < end && !self.channels[id.0].stream.peer_closed() && self.poll().is_ok() {}
         let ch = &mut self.channels[id.0];
+        crate::trace!("channel {:#06x}: closed ({})", ch.stream.local, if ch.stream.peer_closed() { "FIN answered" } else { "no FIN answer" });
         ch.closing = false;
         ch.error = None;
     }
@@ -233,7 +243,10 @@ impl Session {
             match self.wait(id, "the device's SYN", |s| s.is_connected()) {
                 Ok(()) => return Ok(()),
                 Err(e) if attempt == CONNECT_ATTEMPTS => return Err(e),
-                Err(_) => continue,
+                Err(e) => {
+                    crate::trace!("channel {:#06x}: SYN attempt {attempt}: {e}", self.channels[id.0].stream.local);
+                    continue;
+                }
             }
         }
         unreachable!("the last attempt returns")

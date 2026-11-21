@@ -457,8 +457,8 @@ fn connect(timeout: Duration) -> Result<Stomp> {
 fn info(timeout: Duration) -> Result<()> {
     let mut stomp = connect(timeout)?;
     let current = stomp.current_preset()?;
-    let edit = PresetFile::parse(stomp.edit_buffer()?)?;
-    match edit.device_meta() {
+    let stored = PresetFile::parse(stomp.preset_file(current.setlist, 0)?)?;
+    match stored.device_meta() {
         Some(m) => println!("device   {} (USB {:04x}), firmware {} ({})", m.product, stomp.product_id(), m.firmware_text(), m.build),
         None => println!("device   USB {:04x}, firmware unknown", stomp.product_id()),
     }

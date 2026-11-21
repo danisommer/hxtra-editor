@@ -24,3 +24,20 @@ pub mod stream;
 pub mod transport;
 
 pub use error::{Error, Result};
+
+/// Whether `HXS_TRACE` is set: connection steps and requests then go to stderr.
+pub fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HXS_TRACE").is_some())
+}
+
+/// Print a timestamped line to stderr when [`tracing`] is on.
+#[macro_export]
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        if $crate::tracing() {
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            eprintln!("[hxs {}.{:03}] {}", t.as_secs() % 100_000, t.subsec_millis(), format_args!($($arg)*));
+        }
+    };
+}

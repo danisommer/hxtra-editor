@@ -237,6 +237,8 @@ struct BankTracker {
     bank: Option<Bank>,
     own_pending: u32,
     own_until: Option<Instant>,
+    /// Until then, snapshot changes are HXtra's own flips around a save this tool asked for.
+    hold_until: Option<Instant>,
 }
 
 impl BankTracker {
@@ -253,8 +255,17 @@ impl BankTracker {
         self.own_until = Some(now + OWN_SNAPSHOT_WINDOW);
     }
 
+    /// This tool saved the preset: in bank B, HXtra flips to bank A for the save and
+    /// back, which the unit reports as snapshot changes that leave the bank as it was.
+    fn own_save(&mut self, now: Instant) {
+        self.hold_until = Some(now + OWN_SNAPSHOT_WINDOW);
+    }
+
     /// The unit reported a snapshot change; returns the bank after it.
     fn snapshot_reported(&mut self, now: Instant) -> Option<Bank> {
+        if self.hold_until.is_some_and(|h| now <= h) {
+            return self.bank;
+        }
         match self.own_until {
             Some(until) if self.own_pending > 0 && now <= until => self.own_pending -= 1,
             _ => *self = Self::default(),
@@ -315,7 +326,11 @@ impl Worker {
                 let _ = reply.send(result);
             }
             Request::SavePreset { setlist, slot, name, reply } => {
-                let _ = reply.send(self.with_stomp(|s| s.save_preset(setlist, slot, &name)));
+                let result = self.with_stomp(|s| s.save_preset(setlist, slot, &name));
+                if result.is_ok() {
+                    self.banks.own_save(Instant::now());
+                }
+                let _ = reply.send(result);
             }
             Request::RecallSnapshot { number, reply } => {
                 let result = self.recall_snapshot(number);
@@ -578,6 +593,14 @@ mod tests {
         assert_eq!(b.snapshot_reported(t + ms(150)), Some(Bank::A), "a USB select stays in the bank");
         b.own_change(None, t);
         assert_eq!(b.snapshot_reported(t + ms(2000)), None, "too late to be ours");
+        b.preset_loaded();
+        b.own_change(Some(Bank::B), t);
+        b.snapshot_reported(t + ms(50));
+        b.own_save(t + ms(100));
+        for i in 0..4 {
+            assert_eq!(b.snapshot_reported(t + ms(150 + i * 50)), Some(Bank::B), "HXtra's flips around our save");
+        }
+        assert_eq!(b.snapshot_reported(t + ms(3000)), None, "a later change nobody here asked for");
     }
 
     #[test]

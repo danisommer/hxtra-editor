@@ -226,6 +226,19 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [fato, causa desconhecida] A configuração 113 (container `preset_color` do HXtra) passou de int `0` a float `1.0` durante a sessão do HX Edit ou o salvamento. Ela era int `0` em todos os backups anteriores, e na verificação depois do teste MIDI ainda não tinha mudado. Como float, o HXtra lê o Preset LED Color como padrão.
 - [fato, sem reprodução ainda] Uma conexão aberta logo depois de outra fechar falhou no select do notify: o "reply" continha o começo de uma mensagem antiga seguido da resposta de select (`00 00 04 00 01 00 00 00 04`). Um segundo depois, a mesma conexão funcionou. [inferência] O aparelho pode entregar, num stream novo, restos do stream anterior na mesma porta. A correção pensada é reabrir o canal quando a resposta de select não confere.
 
+## Salvar pelo `hxs` (2026-11-21, slot 011, cópia do 010)
+
+- [fato] `save` no monitor (editor `0x47`): no banco A, o Attack salvo (0,074) apareceu no arquivo, e a `0x64` saiu byte a byte idêntica. A seção 4 trocou a ordem das duas atribuições do "more VERB", como no salvamento pelo HX Edit.
+- [fato] Salvar **estando no snapshot 4** (banco B, pelo MIDI): só o bloco 4 mudou no arquivo (Attack 0,05), os outros blocos ficaram com os valores do banco A, e a `0x64` saiu idêntica. Durante o salvamento o aparelho reportou várias trocas de snapshot e os quatro parâmetros controlados voltando aos valores do snapshot 4: é a troca de banco do HXtra em volta do serializador.
+- [fato] O evento `5` acompanha cada salvamento, com `0x74` diferente a cada vez. Agora é decodificado como `PresetSaved`.
+- [inferência forte] A configuração 113 (container `preset_color` do HXtra) volta a float `1.0` quando um preset é salvo:
+  - ela tinha sido restaurada como int `0` (conferido) antes deste teste e estava float `1.0` depois dele;
+  - nas duas ocorrências houve salvamento de preset;
+  - em nenhum teste sem salvamento ela mudou.
+  - Candidata a relatório no HXtra, depois de um teste isolado (só salvar e comparar).
+- [fato] O `restore` e o `info` passaram a ler a versão do firmware do arquivo do preset 0 em vez do edit buffer, para não provocar a troca de banco do HXtra.
+- [fato, não reproduzido] Pela segunda vez, uma conexão aberta logo depois de um comando que gravou (o aparelho recarregou o preset atual) ficou em laço por mais de 2 min, com CPU subindo devagar. Com comandos só de leitura, três rodadas seguidas não reproduziram. `HXS_TRACE=1` imprime cada etapa da conexão e dos pedidos para achar o ponto na próxima ocorrência.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

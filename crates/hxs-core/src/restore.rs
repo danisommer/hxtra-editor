@@ -143,8 +143,10 @@ fn run(stomp: &mut Stomp, action: &Action, setlist: u64) -> Result<()> {
     }
 }
 
+/// The unit's firmware, from a stored preset file: reading the edit buffer would make
+/// HXtra flip snapshot banks when bank B is live (see docs/findings.md).
 fn check_device(stomp: &mut Stomp, b: &Backup, plan: &mut Plan) -> Result<()> {
-    let device = PresetFile::parse(stomp.edit_buffer()?)?.device_meta();
+    let device = PresetFile::parse(stomp.preset_file(b.manifest.setlist, 0)?)?.device_meta();
     match (&b.manifest.device, &device) {
         (Some(want), Some(have)) if want.product != have.product => Err(Error::Backup(format!(
             "the backup is from a {} and the connected unit is a {}",
