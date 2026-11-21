@@ -1,4 +1,4 @@
-# hxtra-software (working name)
+# hxtra-editor
 
 An independent, open-source editor toolkit for the Line 6 HX Stomp running the
 [HXtra](https://github.com/wisemandenny/hxtra) modified firmware. It talks to the
