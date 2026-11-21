@@ -15,6 +15,7 @@ pub const PID_HX_STOMP_XL: u16 = 0x4253;
 
 const INTERFACE: u8 = 0;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 const IN_PACKETS_PER_TRANSFER: usize = 8;
 const IN_TRANSFERS: usize = 2;
 
@@ -77,8 +78,21 @@ impl Link for UsbLink {
         self.product_id
     }
 
+    /// Unlike `transfer_blocking`, which waits without end for a cancelled transfer
+    /// to come back, this gives up after [`CANCEL_TIMEOUT`] and reports it.
     fn write(&mut self, data: &[u8]) -> Result<()> {
-        let c = self.ep_out.transfer_blocking(Buffer::from(data.to_vec()), WRITE_TIMEOUT);
+        self.ep_out.submit(Buffer::from(data.to_vec()));
+        let c = match self.ep_out.wait_next_complete(WRITE_TIMEOUT) {
+            Some(c) => c,
+            None => {
+                self.ep_out.cancel_all();
+                self.ep_out.wait_next_complete(CANCEL_TIMEOUT).ok_or_else(|| {
+                    Error::Protocol(format!(
+                        "the unit took no data for {WRITE_TIMEOUT:?} and the transfer did not cancel; if it stays unresponsive, power-cycle it"
+                    ))
+                })?
+            }
+        };
         c.status?;
         match c.actual_len == data.len() {
             true => Ok(()),

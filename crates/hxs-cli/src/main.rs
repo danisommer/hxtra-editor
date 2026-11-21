@@ -60,6 +60,13 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Empty an IR slot (numbered from 1, as the unit shows them); a dry run unless --yes.
+    DeleteIr {
+        number: u64,
+        /// Really empty the slot.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Print the unit's events live; type `select SLOT`, `set ID VALUE` or `quit`.
     Monitor {
         /// Stop after this many seconds (0: until `quit`).
@@ -102,7 +109,29 @@ fn main() -> Result<()> {
         Command::RestoreGlobals { path, yes } => restore_globals(timeout, &path, yes),
         Command::Restore { dir, yes } => restore_all(timeout, &dir, yes),
         Command::Monitor { seconds, all, no_input } => monitor(timeout, seconds, all, no_input),
+        Command::DeleteIr { number, yes } => delete_ir(timeout, number, yes),
     }
+}
+
+fn delete_ir(timeout: Duration, number: u64, yes: bool) -> Result<()> {
+    let slot = number.checked_sub(1).context("IR slots are numbered from 1")?;
+    let mut stomp = connect(timeout)?;
+    let ir = stomp.ir_list()?.into_iter().find(|i| i.index == slot).with_context(|| format!("IR {number:03} is already empty"))?;
+    println!("IR {number:03} \"{}\" would be emptied", ir.name);
+    if !yes {
+        println!("dry run: nothing written (add --yes to empty the slot)");
+        return Ok(());
+    }
+    stomp.batch_begin()?;
+    let deleted = stomp.delete_ir(slot);
+    let ended = stomp.batch_end();
+    deleted.context("emptying the IR slot")?;
+    ended?;
+    match stomp.ir_list()?.iter().any(|i| i.index == slot) {
+        true => anyhow::bail!("IR {number:03} is still there after the delete"),
+        false => println!("checked: IR {number:03} is empty"),
+    }
+    Ok(())
 }
 
 fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool) -> Result<()> {

@@ -159,6 +159,16 @@ Ações do usuário no HX Edit: importar um IR e apagá-lo; mudar FS4 Function e
 - [inferência nossa] O tipo de evento do notify costuma ser o número do comando que causou a mudança: o evento `0x1e` (knob girado, capturado pelo `hxs monitor`) tem exatamente os campos do comando 30; o `0x14` e o `6` seguem o mesmo padrão.
 - **Decisão (2026-11-21):** o projeto segue próprio (caminho A), focado no suporte ao HXtra. O tonepush serve de referência de protocolo e de ideias de GUI, com crédito; o plano não muda.
 
+## Testes da sessão 2 (2026-11-21)
+
+- [fato] `select` (`0x14`) e `set` (`0x19`) pelo `hxs monitor` funcionam no aparelho. O BPM global (ID 15) foi a 120.0 e voltou a 112,24968, e o restore depois disso não achou nenhuma diferença (f32 exato). O PowerShell manda um BOM (`U+FEFF`) no início da entrada canalizada; o monitor o ignora.
+- [fato] Com dois `select` seguidos, o aviso de carga do primeiro (slot 1) chega depois que o segundo já foi executado: reler o preset atual devolve o slot 0. A thread agora descarta um aviso de carga quando o preset atual é outro, porque o aviso do carregamento mais novo vem em seguida.
+- [fato] Gravação de IR pelo `hxs restore` (`0x09`, num slot vazio, com conferência) e apagamento (`hxs delete-ir`, `0x0f`) funcionaram duas vezes cada. O aparelho terminou igual ao backup.
+- [fato, não reproduzido] Uma vez, o `hxs restore` (simulação) iniciado logo depois de um `delete-ir` ficou parado mais de 2 min, sem CPU, enquanto outro processo conseguia falar com o aparelho em seguida. Na repetição da mesma sequência, nada aconteceu.
+  - Causa desconhecida.
+  - [fato, código do `nusb` 0.2.9] O `transfer_blocking` espera sem limite um cancelamento que não volta. A escrita do `hxs` agora limita essa espera (5 s + 2 s) e falha com uma mensagem.
+  - A abertura do dispositivo (`open` / `claim_interface`) também não tem limite de tempo no `nusb`.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
