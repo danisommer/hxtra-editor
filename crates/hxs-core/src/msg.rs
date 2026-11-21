@@ -81,17 +81,27 @@ pub fn decode_reply(cmd: u8, body: &[u8]) -> Result<Reply> {
 
 const NOTE_KIND: u64 = 0x69;
 const NOTE_BODY: u64 = 0x6a;
-const NOTE_COMPLETION: u64 = 1;
+
+/// The notification kind that carries the final reply of a pending request,
+/// by service: librarian (2) completions come as kind 1, editor (6) ones as
+/// kind 0x14 (seen for librarian 0x08 and 0x09, editor 0x14 and 0x56).
+pub fn completion_kind(service: u8) -> Option<u64> {
+    match service {
+        2 => Some(1),
+        6 => Some(0x14),
+        _ => None,
+    }
+}
 
 /// A notification's kind (key 0x69) and body (key 0x6a).
 pub fn notification(note: &Value) -> Option<(u64, &Value)> {
     Some((get(note, NOTE_KIND)?.as_u64()?, get(note, NOTE_BODY)?))
 }
 
-/// A notification `{0x69: 1, 0x6a: {seq, status, result}}`: the final reply to a
-/// request that was first answered with status 1.
-pub fn completion(note: &Value) -> Option<Reply> {
-    if get(note, NOTE_KIND)?.as_u64()? != NOTE_COMPLETION {
+/// A notification `{0x69: kind, 0x6a: {seq, status, result}}` of the given kind: the
+/// final reply to a request that was first answered with status 1.
+pub fn completion(note: &Value, kind: u64) -> Option<Reply> {
+    if get(note, NOTE_KIND)?.as_u64()? != kind {
         return None;
     }
     let body = get(note, NOTE_BODY)?;
@@ -159,10 +169,15 @@ mod tests {
 
     #[test]
     fn reads_a_completion_notification() {
-        let note = int_map(&[(0x69, Value::from(1)), (0x6a, int_map(&[(0x66, Value::from(1006)), (0x67, Value::from(0)), (0x68, Value::Nil)]))]);
-        let r = completion(&note).unwrap();
+        let note = |kind: u64| int_map(&[(0x69, Value::from(kind)), (0x6a, int_map(&[(0x66, Value::from(1006)), (0x67, Value::from(0)), (0x68, Value::Nil)]))]);
+        let librarian = completion_kind(2).unwrap();
+        let editor = completion_kind(6).unwrap();
+        let r = completion(&note(1), librarian).unwrap();
         assert_eq!((r.seq, r.status), (Some(1006), 0));
-        assert!(completion(&int_map(&[(0x69, Value::from(0x16))])).is_none());
+        assert!(completion(&note(1), editor).is_none());
+        assert!(completion(&note(0x14), editor).is_some());
+        assert!(completion(&int_map(&[(0x69, Value::from(0x16))]), librarian).is_none());
+        assert_eq!(completion_kind(4), None);
     }
 
     #[test]

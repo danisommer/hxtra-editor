@@ -144,13 +144,16 @@ impl Session {
         let Some(notify) = self.notify else {
             return Err(Error::Protocol(format!("command {cmd:#04x} completes on the notify channel, which is not open")));
         };
+        let service = self.channels[id.0].service;
+        let kind = msg::completion_kind(service)
+            .ok_or_else(|| Error::Protocol(format!("command {cmd:#04x}: no known completion notification for service {service}")))?;
         let end = Instant::now() + self.timeout.max(COMPLETION_TIMEOUT);
         loop {
             if let Some(e) = self.channels[notify.0].error.take() {
                 return Err(e);
             }
-            let found = self.notifications.iter().position(|n| msg::completion(n).is_some_and(|r| r.seq == Some(u64::from(seq))));
-            if let Some(reply) = found.and_then(|i| self.notifications.remove(i)).and_then(|n| msg::completion(&n)) {
+            let found = self.notifications.iter().position(|n| msg::completion(n, kind).is_some_and(|r| r.seq == Some(u64::from(seq))));
+            if let Some(reply) = found.and_then(|i| self.notifications.remove(i)).and_then(|n| msg::completion(&n, kind)) {
                 return Ok(reply);
             }
             if Instant::now() >= end {
