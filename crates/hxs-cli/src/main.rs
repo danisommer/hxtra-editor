@@ -4,7 +4,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use hxs_core::backup::{self, Event};
+use hxs_core::globals::Globals;
 use hxs_core::preset::PresetFile;
+use rmpv::Value;
 use hxs_core::snapshot::{self, Bank};
 use hxs_core::stomp::Stomp;
 
@@ -50,6 +52,14 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Write the global settings of a backup (a dry run unless --yes), then read them back.
+    RestoreGlobals {
+        /// A backup folder, or its globals.bin.
+        path: PathBuf,
+        /// Really write the settings.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -61,6 +71,56 @@ fn main() -> Result<()> {
         Command::Backup { dir, setlist } => run_backup(timeout, &dir, setlist),
         Command::Inspect { file } => inspect(&file),
         Command::RestorePreset { file, slot, name, setlist, yes } => restore_preset(timeout, &file, slot, &name, setlist, yes),
+        Command::RestoreGlobals { path, yes } => restore_globals(timeout, &path, yes),
+    }
+}
+
+fn restore_globals(timeout: Duration, path: &std::path::Path, yes: bool) -> Result<()> {
+    let file = match path.is_dir() {
+        true => path.join("globals.bin"),
+        false => path.to_path_buf(),
+    };
+    let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+    let backup = Globals::parse(bytes).with_context(|| format!("parsing {}", file.display()))?;
+    let mut stomp = connect(timeout)?;
+    let current = Globals::parse(stomp.globals()?)?;
+    let changes = backup.changes_from(&current);
+    println!("{} settings to restore from {}, {} differ from the device:", backup.restorable().count(), file.display(), changes.len());
+    for c in &changes {
+        println!("  group {} id {:3}: {} -> {}", c.group, c.id, c.from.as_ref().map_or("(absent)".into(), value_text), value_text(&c.to));
+    }
+    if changes.is_empty() {
+        println!("nothing to change");
+        return Ok(());
+    }
+    if !yes {
+        println!("dry run: nothing written (add --yes to write the settings)");
+        return Ok(());
+    }
+    stomp.write_globals(&backup.restore_blob()).context("writing the global settings")?;
+    println!("written");
+    let after = Globals::parse(stomp.globals()?)?;
+    match backup.changes_from(&after).as_slice() {
+        [] => println!("read back: every restored setting matches the backup, type included"),
+        left => anyhow::bail!(
+            "read back: {} settings still differ: {}",
+            left.len(),
+            left.iter()
+                .map(|c| format!("group {} id {} = {} (backup {})", c.group, c.id, c.from.as_ref().map_or("(absent)".into(), value_text), value_text(&c.to)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+    Ok(())
+}
+
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::F32(f) => format!("{f:?} (float)"),
+        Value::F64(f) => format!("{f:?} (double)"),
+        Value::Integer(i) => format!("{i} (int)"),
+        Value::Boolean(b) => format!("{b} (bool)"),
+        other => other.to_string(),
     }
 }
 

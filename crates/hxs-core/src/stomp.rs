@@ -25,6 +25,7 @@ mod editor_cmd {
     pub const EDIT_BUFFER: u8 = 0x16;
     pub const CURRENT_PRESET: u8 = 0x17;
     pub const GLOBALS: u8 = 0x55;
+    pub const GLOBALS_WRITE: u8 = 0x56;
 }
 
 mod librarian_cmd {
@@ -49,6 +50,7 @@ mod key {
     pub const FORMAT: u64 = 0x65;
     pub const FAVORITE_INDEX: u64 = 0x76;
     pub const MODIFIED: u64 = 0x75;
+    /// The blob of an upload: a preset file (librarian 0x08) or global settings (editor 0x56).
     pub const PRESET_DATA: u64 = 0x6e;
     pub const FLAG_7B: u64 = 0x7b;
     pub const FLAG_7C: u64 = 0x7c;
@@ -136,6 +138,12 @@ impl Stomp {
     pub fn globals(&mut self) -> Result<Vec<u8>> {
         let r = self.session.request(self.editor, editor_cmd::GLOBALS, empty_map())?;
         blob(&r, "globals")
+    }
+
+    /// Write global settings in bulk (editor 0x56), with a blob shaped as
+    /// [`crate::globals::Globals::restore_blob`] builds it, sent as a str as HX Edit does.
+    pub fn write_globals(&mut self, blob: &[u8]) -> Result<()> {
+        self.session.request_raw(self.editor, editor_cmd::GLOBALS_WRITE, &globals_params(blob)).map(drop)
     }
 
     pub fn setlists(&mut self) -> Result<Vec<IndexedEntry>> {
@@ -228,6 +236,14 @@ impl Stomp {
     pub fn batch_end(&mut self) -> Result<()> {
         self.session.request(self.librarian, librarian_cmd::BATCH_END, empty_map()).map(drop)
     }
+}
+
+/// `{0x6e: str(blob)}`, as HX Edit sends its globals restore.
+fn globals_params(blob: &[u8]) -> Vec<u8> {
+    let mut params = vec![0x81];
+    msg::write_uint(&mut params, key::PRESET_DATA);
+    msg::write_raw_str(&mut params, blob);
+    params
 }
 
 /// Notification 4: `{0x6a: {0x6b: setlist, 0x6c: slot}}` once the device has loaded a preset.
@@ -329,6 +345,15 @@ mod tests {
         assert!(is_preset_loaded(&note(4, 11), 0, 11));
         assert!(!is_preset_loaded(&note(4, 10), 0, 11));
         assert!(!is_preset_loaded(&note(8, 11), 0, 11));
+    }
+
+    #[test]
+    fn globals_write_request_matches_hx_edit() {
+        let blob = [0x84; 620];
+        let req = msg::encode_request_raw(1009, editor_cmd::GLOBALS_WRITE, &globals_params(&blob));
+        let head = hex("8366cd03f1645665816eda026c");
+        assert_eq!(&req[..head.len()], &head[..]);
+        assert_eq!(&req[head.len()..], &blob[..]);
     }
 
     #[test]

@@ -235,6 +235,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hxs-core",
+ "rmpv",
 ]
 
 [[package]]

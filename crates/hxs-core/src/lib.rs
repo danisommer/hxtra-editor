@@ -8,6 +8,7 @@
 
 pub mod backup;
 pub mod error;
+pub mod globals;
 pub mod link;
 pub mod msg;
 pub mod preset;
