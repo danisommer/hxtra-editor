@@ -169,6 +169,24 @@ Ações do usuário no HX Edit: importar um IR e apagá-lo; mudar FS4 Function e
   - [fato, código do `nusb` 0.2.9] O `transfer_blocking` espera sem limite um cancelamento que não volta. A escrita do `hxs` agora limita essa espera (5 s + 2 s) e falha com uma mensagem.
   - A abertura do dispositivo (`open` / `claim_interface`) também não tem limite de tempo no `nusb`.
 
+## Eventos confirmados com ações isoladas (2026-11-21, `hxs monitor`, 5 min)
+
+Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas, o restore não achou nenhuma diferença em relação ao backup: as mudanças ficaram no edit buffer (preset modificado).
+
+| Ação | Evento | Status |
+|---|---|---|
+| girar um knob | `0x1e` `{0x62: bloco, 0x1d: true, 0x1a: caminho, 0x1c: parâmetro, 0x77: valor}`, cerca de 1 a cada 3 ms enquanto gira | [fato]; os mesmos campos do comando 30 do tonepush |
+| ligar/desligar um bloco pelo footswitch (modo Stomp) | `0x29` `{0x46: 2, 0x3f: true/false, 0x42: 13055/1037}` + `0x31` `{0x62: 6}` | [fato] a ordem; [inferência] footswitch (número, aceso, cor) e bypass do bloco 6 |
+| trocar de snapshot | `0x2a {0x5c: i}`, `0x17 {0x17: 0}`, `0x2e {0x5c: i}`, com i a partir de 0 | [fato] |
+| ir ao banco B (snapshot 4) e voltar | o mesmo trio, com `0x5c: 0` nas duas vezes | [fato]: o aparelho não distingue os bancos nos eventos (o HXtra troca os registros por baixo) |
+| tap tempo | configuração 16: 92,6 → 89,0 | [fato]: o tap muda o tempo do preset (16), não o global (15) |
+| mover um bloco | `0x31` `{0x4b: 2, 0x4c: 3}` (o mesmo tipo do bypass, com outro payload) | [fato] |
+| mudar o modo dos footswitches | configuração 21: `2` antes das ações em modo Stomp, `3` antes das de snapshot, `1` de passagem | [inferência]: 21 = modo dos footswitches |
+| (junto com as mudanças de modo) | configuração 19 alterna `true`/`false` | significado desconhecido |
+
+- Com o aparelho parado, nenhum evento além do ruído conhecido (157 e `0x16/0xa/0x1b`).
+- O `notify.rs` agora decodifica `ParameterChanged`, `BlockMoved`, `SnapshotSelected`, `SnapshotApplied` e `Footswitch`.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

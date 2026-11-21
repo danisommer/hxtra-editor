@@ -16,7 +16,11 @@ mod kind {
     pub const PRESET_LOADING: u64 = 8;
     pub const EDITOR_COMPLETION: u64 = 0x14;
     pub const SETTING_CHANGED: u64 = 0x16;
+    pub const PARAMETER_CHANGED: u64 = 0x1e;
     pub const BLOCK_SELECTED: u64 = 0x27;
+    pub const FOOTSWITCH: u64 = 0x29;
+    pub const SNAPSHOT_SELECTED: u64 = 0x2a;
+    pub const SNAPSHOT_APPLIED: u64 = 0x2e;
     pub const BLOCK_CHANGED: u64 = 0x31;
     pub const FAVORITE_ADDED: u64 = 0x38;
     pub const FAVORITE_DELETED: u64 = 0x3b;
@@ -32,6 +36,15 @@ mod key {
     pub const NAME: u64 = 0x6d;
     pub const BLOCK: u64 = 0x62;
     pub const FAVORITE: u64 = 0x76;
+    pub const PATH: u64 = 0x1a;
+    pub const PARAMETER: u64 = 0x1c;
+    pub const VALUE: u64 = 0x77;
+    pub const MOVED_FROM: u64 = 0x4b;
+    pub const MOVED_TO: u64 = 0x4c;
+    pub const SNAPSHOT: u64 = 0x5c;
+    pub const SWITCH: u64 = 0x46;
+    pub const LIT: u64 = 0x3f;
+    pub const COLOR: u64 = 0x42;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,8 +57,20 @@ pub enum Notification {
     PresetLoaded { setlist: u64, slot: u64 },
     PresetRenamed { setlist: u64, slot: u64, name: String },
     BlockSelected { block: u64 },
-    /// A block's model or contents changed.
+    /// A block's model or contents changed (also its bypass).
     BlockChanged { block: u64 },
+    /// A block moved from one grid position to another.
+    BlockMoved { from: u64, to: u64 },
+    /// A parameter of a block has a new value (a knob, HX Edit or this tool).
+    ParameterChanged { block: u64, path: u64, index: u64, value: Value },
+    /// A snapshot was selected: `index` 0..2 within the live bank (HXtra's
+    /// bank B reports the same indexes as bank A).
+    SnapshotSelected { index: u64 },
+    /// Sent after [`Notification::SnapshotSelected`] with the same index.
+    SnapshotApplied { index: u64 },
+    /// A footswitch's state changed (seen as a block was toggled from one; the
+    /// meaning of `lit` and `color` is inferred).
+    Footswitch { switch: u64, lit: bool, color: u64 },
     FavoriteAdded { index: u64, name: String },
     FavoriteDeleted { index: u64 },
     /// The final reply to a pending request (`kind` 1 librarian, 0x14 editor).
@@ -56,7 +81,10 @@ pub enum Notification {
 pub fn decode(note: &Value) -> Notification {
     let unknown = || Notification::Unknown { kind: msg::get(note, key::KIND).and_then(Value::as_u64), note: note.clone() };
     let Some((k, body)) = msg::notification(note) else { return unknown() };
-    let payload = msg::get(body, key::PAYLOAD);
+    let payload = match k {
+        kind::SNAPSHOT_SELECTED | kind::SNAPSHOT_APPLIED | kind::FOOTSWITCH => Some(body),
+        _ => msg::get(body, key::PAYLOAD),
+    };
     let int = |k| payload.and_then(|p| msg::get(p, k)).and_then(Value::as_u64);
     let text = |k| payload.and_then(|p| msg::get(p, k)).and_then(msg::text);
     let decoded = match k {
@@ -70,7 +98,22 @@ pub fn decode(note: &Value) -> Notification {
             .zip(text(key::NAME))
             .map(|((setlist, slot), name)| Notification::PresetRenamed { setlist, slot, name }),
         kind::BLOCK_SELECTED => int(key::BLOCK).map(|block| Notification::BlockSelected { block }),
-        kind::BLOCK_CHANGED => int(key::BLOCK).map(|block| Notification::BlockChanged { block }),
+        kind::BLOCK_CHANGED => match (int(key::MOVED_FROM), int(key::MOVED_TO), int(key::BLOCK)) {
+            (Some(from), Some(to), _) => Some(Notification::BlockMoved { from, to }),
+            (_, _, Some(block)) => Some(Notification::BlockChanged { block }),
+            _ => None,
+        },
+        kind::PARAMETER_CHANGED => int(key::BLOCK)
+            .zip(int(key::PATH))
+            .zip(int(key::PARAMETER))
+            .zip(payload.and_then(|p| msg::get(p, key::VALUE)))
+            .map(|(((block, path), index), value)| Notification::ParameterChanged { block, path, index, value: value.clone() }),
+        kind::SNAPSHOT_SELECTED => int(key::SNAPSHOT).map(|index| Notification::SnapshotSelected { index }),
+        kind::SNAPSHOT_APPLIED => int(key::SNAPSHOT).map(|index| Notification::SnapshotApplied { index }),
+        kind::FOOTSWITCH => int(key::SWITCH)
+            .zip(payload.and_then(|p| msg::get(p, key::LIT)).and_then(Value::as_bool))
+            .zip(int(key::COLOR))
+            .map(|((switch, lit), color)| Notification::Footswitch { switch, lit, color }),
         kind::FAVORITE_ADDED => int(key::FAVORITE)
             .map(|index| Notification::FavoriteAdded { index, name: text(key::NAME).unwrap_or_default() }),
         kind::FAVORITE_DELETED => int(key::FAVORITE).map(|index| Notification::FavoriteDeleted { index }),
@@ -105,6 +148,22 @@ mod tests {
         assert_eq!(decode(&fav), Notification::FavoriteAdded { index: 0x11, name: "Minotaur".into() });
         let done = int_map(&[(0x69, Value::from(0x14)), (0x6a, int_map(&[(0x66, Value::from(1001)), (0x67, Value::from(0)), (0x68, Value::Nil)]))]);
         assert_eq!(decode(&done), Notification::Completion { kind: 0x14, seq: 1001, status: 0 });
+    }
+
+    #[test]
+    fn decodes_the_kinds_seen_with_hxs_monitor() {
+        let knob = event(0x1e, int_map(&[(0x62, Value::from(4)), (0x1d, Value::from(true)), (0x1a, Value::from(0)), (0x1c, Value::from(2)), (0x77, Value::F32(0.028))]));
+        assert_eq!(decode(&knob), Notification::ParameterChanged { block: 4, path: 0, index: 2, value: Value::F32(0.028) });
+        let moved = event(0x31, int_map(&[(0x4b, Value::from(2)), (0x4c, Value::from(3))]));
+        assert_eq!(decode(&moved), Notification::BlockMoved { from: 2, to: 3 });
+        let changed = event(0x31, int_map(&[(0x62, Value::from(6))]));
+        assert_eq!(decode(&changed), Notification::BlockChanged { block: 6 });
+        let snap = int_map(&[(0x69, Value::from(0x2a)), (0x6a, int_map(&[(0x5c, Value::from(1))]))]);
+        assert_eq!(decode(&snap), Notification::SnapshotSelected { index: 1 });
+        let applied = int_map(&[(0x69, Value::from(0x2e)), (0x6a, int_map(&[(0x5c, Value::from(1))]))]);
+        assert_eq!(decode(&applied), Notification::SnapshotApplied { index: 1 });
+        let fs = int_map(&[(0x69, Value::from(0x29)), (0x6a, int_map(&[(0x46, Value::from(2)), (0x3f, Value::from(true)), (0x42, Value::from(13055))]))]);
+        assert_eq!(decode(&fs), Notification::Footswitch { switch: 2, lit: true, color: 13055 });
     }
 
     #[test]

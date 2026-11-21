@@ -174,6 +174,11 @@ fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool) -> Result
                     println!("{t:9.3}  UNKNOWN notification {}: {note}", signature(*kind, note));
                 }
             }
+            Event::Notified(Notification::ParameterChanged { block, path, index, value }) => {
+                if limiter.allows(format!("parameter {block}/{path}/{index}")) {
+                    println!("{t:9.3}  parameter block {block} path {path} index {index} = {}", value_text(value));
+                }
+            }
             Event::Notified(n) => println!("{t:9.3}  {n:?}"),
             Event::Problem { message } => println!("{t:9.3}  problem: {message}"),
             Event::Disconnected { reason } => {
