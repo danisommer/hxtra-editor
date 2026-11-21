@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::preset::{DeviceMeta, PresetFile};
@@ -19,9 +19,9 @@ use crate::{Error, Result, msg};
 pub const FORMAT: &str = "hxs-backup";
 pub const FORMAT_VERSION: u32 = 1;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
-    pub format: &'static str,
+    pub format: String,
     pub format_version: u32,
     pub tool: String,
     pub created_unix: u64,
@@ -34,25 +34,26 @@ pub struct Manifest {
     pub globals: FileRecord,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FileRecord {
     pub file: String,
     pub bytes: usize,
     pub sha256: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PresetRecord {
     pub slot: usize,
     pub file_id: u64,
     pub name: String,
+    #[serde(default)]
     pub list_flags: ListFlags,
     pub bank_b: bool,
     #[serde(flatten)]
     pub file: FileRecord,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IrRecord {
     pub index: u64,
     pub name: String,
@@ -60,7 +61,7 @@ pub struct IrRecord {
     pub info: FileRecord,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NamedFile {
     pub index: u64,
     pub name: String,
@@ -133,7 +134,7 @@ fn collect(stomp: &mut Stomp, dir: &Path, setlist: u64, tool: &str, progress: &m
     progress(Event::Globals);
 
     Ok(Manifest {
-        format: FORMAT,
+        format: FORMAT.to_owned(),
         format_version: FORMAT_VERSION,
         tool: tool.to_owned(),
         created_unix: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),

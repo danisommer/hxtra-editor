@@ -145,6 +145,16 @@ pub fn text(v: &Value) -> Option<String> {
     Some(String::from_utf8_lossy(&b[..end]).into_owned())
 }
 
+/// Whether a str anywhere in `v` holds bytes that are not UTF-8 (`rmpv` would write it back as a bin).
+pub fn has_invalid_utf8(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.as_str().is_none(),
+        Value::Array(items) => items.iter().any(has_invalid_utf8),
+        Value::Map(pairs) => pairs.iter().any(|(k, v)| has_invalid_utf8(k) || has_invalid_utf8(v)),
+        _ => false,
+    }
+}
+
 pub fn encode_value(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     rmpv::encode::write_value(&mut out, v).expect("writing to a Vec cannot fail");

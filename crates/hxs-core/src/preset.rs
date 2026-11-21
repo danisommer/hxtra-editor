@@ -41,7 +41,7 @@ pub struct PresetFile {
     trailing: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeviceMeta {
     pub product: String,
     pub firmware: u64,

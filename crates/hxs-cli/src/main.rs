@@ -7,7 +7,9 @@ use hxs_core::backup::{self, Event};
 use hxs_core::globals::Globals;
 use hxs_core::preset::PresetFile;
 use rmpv::Value;
+use hxs_core::restore;
 use hxs_core::snapshot::{self, Bank};
+use hxs_core::stomp::ListFlags;
 use hxs_core::stomp::Stomp;
 
 /// Read-only tools for an HX Stomp running HXtra (close HX Edit first).
@@ -52,6 +54,14 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Restore a whole backup: IRs, presets, favorites and global settings that differ
+    /// from the unit (a dry run unless --yes), then compare again.
+    Restore {
+        dir: PathBuf,
+        /// Really write what differs.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Write the global settings of a backup (a dry run unless --yes), then read them back.
     RestoreGlobals {
         /// A backup folder, or its globals.bin.
@@ -72,6 +82,47 @@ fn main() -> Result<()> {
         Command::Inspect { file } => inspect(&file),
         Command::RestorePreset { file, slot, name, setlist, yes } => restore_preset(timeout, &file, slot, &name, setlist, yes),
         Command::RestoreGlobals { path, yes } => restore_globals(timeout, &path, yes),
+        Command::Restore { dir, yes } => restore_all(timeout, &dir, yes),
+    }
+}
+
+fn restore_all(timeout: Duration, dir: &std::path::Path, yes: bool) -> Result<()> {
+    let b = restore::Backup::open(dir).with_context(|| format!("opening the backup in {}", dir.display()))?;
+    println!("backup: {} presets, {} IRs, {} favorites (files match their SHA-256)", b.manifest.presets.len(), b.manifest.irs.len(), b.manifest.favorites.len());
+    let mut stomp = connect(timeout)?;
+    let plan = restore::plan(&mut stomp, &b)?;
+    for note in &plan.notes {
+        println!("note: {note}");
+    }
+    print_plan(&plan);
+    if plan.is_empty() {
+        println!("the unit already matches the backup");
+        return Ok(());
+    }
+    if !yes {
+        println!("dry run: nothing written (add --yes to write these {} actions)", plan.actions.len());
+        return Ok(());
+    }
+    restore::apply(&mut stomp, &plan, b.manifest.setlist, |a| println!("-> {}", a.describe())).context("restoring")?;
+    let left = restore::plan(&mut stomp, &b)?;
+    match left.is_empty() {
+        true => println!("checked: the unit now matches the backup"),
+        false => {
+            print_plan(&left);
+            anyhow::bail!("{} actions still differ after the restore", left.actions.len())
+        }
+    }
+    Ok(())
+}
+
+fn print_plan(plan: &restore::Plan) {
+    for a in &plan.actions {
+        println!("  {}", a.describe());
+        if let restore::Action::Globals { changes, .. } = a {
+            for c in changes {
+                println!("      group {} id {:3}: {} -> {}", c.group, c.id, c.from.as_ref().map_or("(absent)".into(), restore::value_text), restore::value_text(&c.to));
+            }
+        }
     }
 }
 
@@ -115,13 +166,7 @@ fn restore_globals(timeout: Duration, path: &std::path::Path, yes: bool) -> Resu
 }
 
 fn value_text(v: &Value) -> String {
-    match v {
-        Value::F32(f) => format!("{f:?} (float)"),
-        Value::F64(f) => format!("{f:?} (double)"),
-        Value::Integer(i) => format!("{i} (int)"),
-        Value::Boolean(b) => format!("{b} (bool)"),
-        other => other.to_string(),
-    }
+    restore::value_text(v)
 }
 
 fn restore_preset(timeout: Duration, file: &std::path::Path, slot: usize, name: &str, setlist: u64, yes: bool) -> Result<()> {
@@ -151,7 +196,7 @@ fn restore_preset(timeout: Duration, file: &std::path::Path, slot: usize, name: 
         return Ok(());
     }
     stomp.batch_begin()?;
-    let written = stomp.upload_preset(setlist, slot, name, preset.bytes());
+    let written = stomp.upload_preset(setlist, slot, name, ListFlags::default(), preset.bytes());
     let ended = stomp.batch_end();
     written.context("uploading the preset")?;
     ended.context("ending the librarian batch")?;

@@ -12,6 +12,7 @@ pub mod globals;
 pub mod link;
 pub mod msg;
 pub mod preset;
+pub mod restore;
 pub mod session;
 pub mod snapshot;
 pub mod stomp;

@@ -1,6 +1,7 @@
 //! The HX Stomp's editor and librarian services, as HX Edit uses them.
-//! Every command here only reads from the device, except
-//! [`Stomp::upload_preset`], which overwrites a preset slot.
+//! Reads, plus the writes a restore needs: [`Stomp::upload_preset`],
+//! [`Stomp::write_globals`], [`Stomp::upload_ir`], [`Stomp::delete_ir`] and
+//! [`Stomp::write_favorite`].
 
 use std::time::Duration;
 
@@ -33,11 +34,14 @@ mod librarian_cmd {
     pub const PRESET_LIST: u8 = 0x01;
     pub const PRESET_FILE: u8 = 0x04;
     pub const PRESET_UPLOAD: u8 = 0x08;
+    pub const IR_UPLOAD: u8 = 0x09;
     pub const IR_DATA: u8 = 0x0b;
     pub const IR_INFO: u8 = 0x0c;
     pub const IR_LIST: u8 = 0x0d;
+    pub const IR_DELETE: u8 = 0x0f;
     pub const FAVORITE_LIST: u8 = 0x70;
     pub const FAVORITE: u8 = 0x71;
+    pub const FAVORITE_WRITE: u8 = 0x72;
     pub const BATCH_END: u8 = 0xfe;
     pub const BATCH_BEGIN: u8 = 0xff;
 }
@@ -55,6 +59,10 @@ mod key {
     pub const FLAG_7B: u64 = 0x7b;
     pub const FLAG_7C: u64 = 0x7c;
     pub const FLAG_7D: u64 = 0x7d;
+    pub const FAVORITE_DATA: u64 = 0x22;
+    pub const FAVORITE_FLAG: u64 = 0x1f;
+    pub const FAVORITE_BLOCK: u64 = 0x40;
+    pub const FAVORITE_NUMBER: u64 = 0x1c;
 }
 
 /// The value HX Edit sends in key 0x65 of librarian requests.
@@ -78,7 +86,7 @@ pub struct PresetEntry {
 
 /// The three values each preset list entry carries next to its name (keys
 /// 0x7b, 0x7c, 0x7d; meaning not yet known). `None` when the entry lacks one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ListFlags {
     pub flag_7b: Option<bool>,
     pub flag_7c: Option<bool>,
@@ -146,6 +154,33 @@ impl Stomp {
         self.session.request_raw(self.editor, editor_cmd::GLOBALS_WRITE, &globals_params(blob)).map(drop)
     }
 
+    /// Write an IR into an empty slot (librarian 0x09), with the info map a backup read
+    /// through [`Stomp::ir_info`] and the data from [`Stomp::ir_data`].
+    pub fn upload_ir(&mut self, slot: u64, info: &Value, data: &[u8]) -> Result<()> {
+        let params = ir_upload_params(slot, info, data)?;
+        self.session.request_raw(self.librarian, librarian_cmd::IR_UPLOAD, &params).map(drop)
+    }
+
+    pub fn delete_ir(&mut self, slot: u64) -> Result<()> {
+        self.session.request(self.librarian, librarian_cmd::IR_DELETE, int_map(&[(key::IR_INDEX, Value::from(slot))])).map(drop)
+    }
+
+    /// Write a favorite (librarian 0x72) from the value [`Stomp::favorite`] returned,
+    /// without the number the device assigns.
+    pub fn write_favorite(&mut self, index: u64, favorite: &Value) -> Result<()> {
+        if msg::has_invalid_utf8(favorite) {
+            return Err(Error::Backup(format!("favorite {index} holds a str that is not UTF-8; it cannot be sent back as it was read")));
+        }
+        let name = msg::get(favorite, key::NAME).cloned().ok_or_else(|| missing("favorite", "name"))?;
+        let params = int_map(&[
+            (key::FAVORITE_INDEX, Value::from(index)),
+            (key::FAVORITE_DATA, favorite_without_number(favorite)),
+            (key::FAVORITE_FLAG, Value::from(false)),
+            (key::NAME, name),
+        ]);
+        self.session.request(self.librarian, librarian_cmd::FAVORITE_WRITE, params).map(drop)
+    }
+
     pub fn setlists(&mut self) -> Result<Vec<IndexedEntry>> {
         let r = self.session.request(self.librarian, librarian_cmd::SETLISTS, Value::Nil)?;
         single_entry_maps(&r, "setlist list").map(|v| v.into_iter().map(|(index, v)| IndexedEntry { index, name: msg::text(v).unwrap_or_default() }).collect())
@@ -209,14 +244,15 @@ impl Stomp {
     /// the device reloads it; this returns only after that load has finished
     /// (notification 4 for the slot), as HX Edit waits before reading it again.
     /// Wrap it in [`Stomp::batch_begin`] / [`Stomp::batch_end`] as HX Edit does.
-    pub fn upload_preset(&mut self, setlist: u64, slot: usize, name: &str, file: &[u8]) -> Result<()> {
+    /// `flags` are the list entry's values; `None` sends what HX Edit sends on an import.
+    pub fn upload_preset(&mut self, setlist: u64, slot: usize, name: &str, flags: ListFlags, file: &[u8]) -> Result<()> {
         validate_name(name)?;
         if file.len() > MAX_PRESET_FILE {
             return Err(Error::Preset(format!("{} bytes is more than the {MAX_PRESET_FILE} a preset upload carries", file.len())));
         }
         let current = self.current_preset()?;
         let reloads = current.setlist == setlist && current.slot == slot as u64;
-        let params = upload_params(setlist, slot, name, file);
+        let params = upload_params(setlist, slot, name, flags, file);
         self.session.clear_notifications();
         self.session.request_raw(self.librarian, librarian_cmd::PRESET_UPLOAD, &params)?;
         match reloads {
@@ -263,9 +299,9 @@ pub fn validate_name(name: &str) -> Result<()> {
     }
 }
 
-/// `{0x6b: setlist, 0x6c: slot, 0x6d: "name\0", 0x7b: false, 0x7c: false, 0x7d: 0, 0x6e: str(file)}`,
-/// in HX Edit's order and types.
-fn upload_params(setlist: u64, slot: usize, name: &str, file: &[u8]) -> Vec<u8> {
+/// `{0x6b: setlist, 0x6c: slot, 0x6d: "name\0", 0x7b, 0x7c, 0x7d, 0x6e: str(file)}`,
+/// in HX Edit's order and types (flags default to an import's `false, false, 0`).
+fn upload_params(setlist: u64, slot: usize, name: &str, flags: ListFlags, file: &[u8]) -> Vec<u8> {
     let mut p = Vec::with_capacity(file.len() + 64);
     p.push(0x87);
     for (k, v) in [(key::SETLIST, setlist), (key::PRESET, slot as u64)] {
@@ -274,15 +310,53 @@ fn upload_params(setlist: u64, slot: usize, name: &str, file: &[u8]) -> Vec<u8> 
     }
     msg::write_uint(&mut p, key::NAME);
     msg::write_raw_str(&mut p, format!("{name}\0").as_bytes());
-    for k in [key::FLAG_7B, key::FLAG_7C] {
+    for (k, v) in [(key::FLAG_7B, flags.flag_7b), (key::FLAG_7C, flags.flag_7c)] {
         msg::write_uint(&mut p, k);
-        p.push(0xc2);
+        rmp::encode::write_bool(&mut p, v.unwrap_or(false)).expect("writing to a Vec cannot fail");
     }
     msg::write_uint(&mut p, key::FLAG_7D);
-    msg::write_uint(&mut p, 0);
+    msg::write_uint(&mut p, flags.flag_7d.unwrap_or(0));
     msg::write_uint(&mut p, key::PRESET_DATA);
     msg::write_raw_str(&mut p, file);
     p
+}
+
+/// The IR's own info map (as the 0x0c read gives it) with 0x70 set to `slot`,
+/// then `0x6e: str(data)`: HX Edit's 0x09 import.
+fn ir_upload_params(slot: u64, info: &Value, data: &[u8]) -> Result<Vec<u8>> {
+    let entries = info.as_map().ok_or_else(|| Error::Backup(format!("IR info is not a map: {info}")))?;
+    if msg::has_invalid_utf8(info) {
+        return Err(Error::Backup("IR info holds a str that is not UTF-8; it cannot be sent back as it was read".into()));
+    }
+    let mut p = Vec::with_capacity(data.len() + 128);
+    rmp::encode::write_map_len(&mut p, entries.len() as u32 + 1).expect("writing to a Vec cannot fail");
+    for (k, v) in entries {
+        p.extend(msg::encode_value(k));
+        match k.as_u64() {
+            Some(key::IR_INDEX) => msg::write_uint(&mut p, slot),
+            _ => p.extend(msg::encode_value(v)),
+        }
+    }
+    msg::write_uint(&mut p, key::PRESET_DATA);
+    msg::write_raw_str(&mut p, data);
+    Ok(p)
+}
+
+/// A favorite without the number the device assigns to it (0x40 → 0x1c), as HX Edit sends it back.
+pub fn favorite_without_number(favorite: &Value) -> Value {
+    let Some(entries) = favorite.as_map() else { return favorite.clone() };
+    Value::Map(
+        entries
+            .iter()
+            .map(|(k, v)| match (k.as_u64(), v.as_map()) {
+                (Some(key::FAVORITE_BLOCK), Some(block)) => (
+                    k.clone(),
+                    Value::Map(block.iter().filter(|(bk, _)| bk.as_u64() != Some(key::FAVORITE_NUMBER)).cloned().collect()),
+                ),
+                _ => (k.clone(), v.clone()),
+            })
+            .collect(),
+    )
 }
 
 fn missing(what: &str, field: &str) -> Error {
@@ -328,11 +402,41 @@ mod tests {
     #[test]
     fn upload_request_matches_hx_edit() {
         let file = [0xa9; 3222];
-        let req = msg::encode_request_raw(1006, librarian_cmd::PRESET_UPLOAD, &upload_params(0, 11, "AC30 Clean", &file));
+        let req = msg::encode_request_raw(1006, librarian_cmd::PRESET_UPLOAD, &upload_params(0, 11, "AC30 Clean", ListFlags::default(), &file));
         let head = hex("8366cd03ee640865876b006c0b6dab4143333020436c65616e007bc27cc27d006eda0c96");
         assert_eq!(&req[..head.len()], &head[..]);
         assert_eq!(&req[head.len()..], &file[..]);
         assert_eq!(req.len(), 3258);
+    }
+
+    #[test]
+    fn ir_upload_request_matches_hx_edit() {
+        let info = int_map(&[
+            (0x70, Value::from(0)),
+            (0x71, Value::from(0xe856311cu64)),
+            (0x6d, Value::from("1960-G12M25-R121-Cap-0_5in\0")),
+            (0x72, Value::from(1)),
+            (0x73, Value::from(3)),
+            (0x7b, Value::from(false)),
+            (0x7c, Value::from(false)),
+            (0x7d, Value::from(0)),
+        ]);
+        let data = [0x01; 8192];
+        let req = msg::encode_request_raw(1006, librarian_cmd::IR_UPLOAD, &ir_upload_params(6, &info, &data).unwrap());
+        let head = hex("8366cd03ee64096589700671cee856311c6dbb313936302d4731324d32352d523132312d4361702d305f35696e00720173037bc27cc27d006eda2000");
+        assert_eq!(&req[..head.len()], &head[..]);
+        assert_eq!(&req[head.len()..], &data[..]);
+    }
+
+    #[test]
+    fn favorites_lose_only_their_number() {
+        let block = int_map(&[(0x13, Value::from(6)), (0x1c, Value::from(3)), (0x14, Value::from("body"))]);
+        let fav = int_map(&[(0x76, Value::from(2)), (0x6d, Value::from("Comp\0")), (0x40, block)]);
+        let stripped = favorite_without_number(&fav);
+        let block = msg::get(&stripped, 0x40).unwrap();
+        assert_eq!(msg::get(block, 0x1c), None);
+        assert_eq!(msg::get(block, 0x13).and_then(Value::as_u64), Some(6));
+        assert_eq!(msg::get(&stripped, 0x76).and_then(Value::as_u64), Some(2));
     }
 
     #[test]
