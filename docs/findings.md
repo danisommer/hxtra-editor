@@ -204,6 +204,14 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
   1. selecionar o 4–6 por MIDI CC 69 e acompanhar o banco pelo que o próprio app enviou, mais as cargas de preset (que voltam ao A). As trocas feitas no aparelho, apertando o footswitch aceso, ficariam por inferir;
   2. contribuir ao HXtra um comando USB (há números livres: `0x13`, `0x1d`, `0x1f`, `0x20`, `0x26`, `0x2c`, `0x36`, `0x37`, `0x4f`, `0x50`, `0x64`, `0x65`) que informe e mude o banco, e talvez leia e grave os registros do banco B ao vivo. Exige build de firmware e conversa com o mantenedor.
 
+## Teste do MIDI CC 69 (2026-11-21, preset 010)
+
+- [fato] Com o preset 010 carregado, `CC 69 = 3` (canal 1), enviado do Windows pela porta `Line 6 HX Stomp 1`, foi aceito: o aparelho mandou o trio de snapshot com `0x5c: 0`. `CC 69 = 0`, 4 s depois, mandou o mesmo trio com `0x5c: 0`. Os dois são indistinguíveis pelo USB, o que confirma que o banco não aparece nos eventos.
+- [fato] O Stomp não mandou nenhuma mensagem pela própria saída MIDI (porta `Line 6 HX Stomp 0`) durante o teste.
+- [fato] Recarregar o 010 (`select 10`) e conferir com o backup: nada gravado mudou.
+- [a confirmar de ouvido] Se o som mudou para o snapshot 4 (more DELAY/VERB) entre o CC 69 = 3 e o CC 69 = 0.
+- Script: `midi_snapshot_test.py` (no scratchpad desta sessão, com `mido`): `hxs monitor` como subprocesso, mais a saída e a entrada MIDI numa linha do tempo só.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
