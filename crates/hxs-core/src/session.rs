@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rmpv::Value;
 
-use crate::link::UsbLink;
+use crate::link::{Link, UsbLink};
 use crate::msg;
 use crate::stream::Stream;
 use crate::transport::{Body, Packet};
@@ -39,10 +39,12 @@ struct Channel {
     seq: u16,
     error: Option<Error>,
     open: bool,
+    /// FIN sent, waiting for the device's: still routed, no heartbeat.
+    closing: bool,
 }
 
 pub struct Session {
-    link: UsbLink,
+    link: Box<dyn Link>,
     channels: Vec<Channel>,
     timeout: Duration,
     notify: Option<ChannelId>,
@@ -51,10 +53,30 @@ pub struct Session {
 }
 
 impl Session {
+    /// The HX Stomp on USB, after discarding what a previous session left queued.
     pub fn open(timeout: Duration) -> Result<Self> {
         let mut link = UsbLink::open()?;
         link.purge(PURGE)?;
-        Ok(Self { link, channels: Vec::new(), timeout, notify: None, notify_buf: Vec::new(), notifications: VecDeque::new() })
+        Ok(Self::over(Box::new(link), timeout))
+    }
+
+    pub fn over(link: Box<dyn Link>, timeout: Duration) -> Self {
+        Self { link, channels: Vec::new(), timeout, notify: None, notify_buf: Vec::new(), notifications: VecDeque::new() }
+    }
+
+    /// Keep the session alive while nothing is asked: read what arrived, drain
+    /// notify, send due heartbeats. Fails if a channel broke (the device closed it).
+    pub fn pump(&mut self) -> Result<()> {
+        self.poll()?;
+        match self.channels.iter_mut().find_map(|c| c.error.take()) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Every notification received and not consumed as a request's completion, oldest first.
+    pub fn take_notifications(&mut self) -> Vec<Value> {
+        self.notifications.drain(..).collect()
     }
 
     pub fn product_id(&self) -> u16 {
@@ -63,7 +85,14 @@ impl Session {
 
     pub fn open_channel(&mut self, port: Port) -> Result<ChannelId> {
         let id = ChannelId(self.channels.len());
-        self.channels.push(Channel { stream: Stream::new(port.local, port.remote), service: port.service, seq: FIRST_SEQ, error: None, open: true });
+        self.channels.push(Channel {
+            stream: Stream::new(port.local, port.remote),
+            service: port.service,
+            seq: FIRST_SEQ,
+            error: None,
+            open: true,
+            closing: false,
+        });
         self.connect(id)?;
         let select = [&msg::header(u16::from(port.service), 1)[..], &[port.service]].concat();
         self.send(id, &select)?;
@@ -129,15 +158,20 @@ impl Session {
         }
     }
 
+    /// Send FIN and wait (briefly) for the device's, so it frees the port at once.
     pub fn close_channel(&mut self, id: ChannelId) {
         let ch = &mut self.channels[id.0];
         if !std::mem::replace(&mut ch.open, false) || !ch.stream.is_connected() {
             return;
         }
+        ch.closing = true;
         let fin = ch.stream.fin();
         let _ = self.link.write(&fin);
         let end = Instant::now() + CLOSE_DRAIN;
-        while Instant::now() < end && self.poll().is_ok() {}
+        while Instant::now() < end && !self.channels[id.0].stream.peer_closed() && self.poll().is_ok() {}
+        let ch = &mut self.channels[id.0];
+        ch.closing = false;
+        ch.error = None;
     }
 
     fn await_completion(&mut self, id: ChannelId, cmd: u8, seq: u16) -> Result<msg::Reply> {
@@ -278,7 +312,7 @@ impl Session {
 
     fn route(&mut self, p: Packet) {
         let Body::Stream(sp) = &p.body else { return };
-        if let Some(ch) = self.channels.iter_mut().find(|c| c.open && c.stream.owns(&p)) {
+        if let Some(ch) = self.channels.iter_mut().find(|c| (c.open || c.closing) && c.stream.owns(&p)) {
             if let Err(e) = ch.stream.handle(sp) {
                 ch.error.get_or_insert(e);
             }
@@ -291,5 +325,82 @@ impl Drop for Session {
         for i in 0..self.channels.len() {
             self.close_channel(ChannelId(i));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::msg::int_map;
+    use crate::sim::{SimDevice, SimReply};
+    use crate::stomp::{EDITOR, LIBRARIAN, NOTIFY};
+
+    const T: Duration = Duration::from_millis(500);
+
+    fn open(sim: &SimDevice) -> (Session, ChannelId, ChannelId) {
+        let mut s = Session::over(sim.link(), T);
+        let lib = s.open_channel(LIBRARIAN).unwrap();
+        let ed = s.open_channel(EDITOR).unwrap();
+        s.open_notify(NOTIFY).unwrap();
+        (s, lib, ed)
+    }
+
+    #[test]
+    fn a_request_gets_its_result() {
+        let sim = SimDevice::new();
+        sim.on(6, 0x17, |_| SimReply::Done(int_map(&[(0x6c, Value::from(10))])));
+        let (mut s, _, ed) = open(&sim);
+        let r = s.request(ed, 0x17, Value::Nil).unwrap();
+        assert_eq!(msg::get(&r, 0x6c).and_then(Value::as_u64), Some(10));
+        assert_eq!(sim.requests().last().map(|r| (r.0, r.1)), Some((6, 0x17)));
+    }
+
+    #[test]
+    fn pending_requests_complete_on_notify_for_each_service() {
+        let sim = SimDevice::new();
+        sim.on(2, 0x08, |_| SimReply::Pending(Value::Nil));
+        sim.on(6, 0x56, |_| SimReply::Pending(Value::from(7)));
+        let (mut s, lib, ed) = open(&sim);
+        assert!(s.request(lib, 0x08, Value::Nil).unwrap().is_nil());
+        assert_eq!(s.request(ed, 0x56, Value::Nil).unwrap().as_u64(), Some(7));
+    }
+
+    #[test]
+    fn a_refusal_is_an_error_with_its_code() {
+        let sim = SimDevice::new();
+        sim.on(6, 0x52, |_| SimReply::Refuse { status: 255, code: -45 });
+        let (mut s, _, ed) = open(&sim);
+        match s.request(ed, 0x52, Value::Nil) {
+            Err(Error::Refused { cmd: 0x52, status: 255, code: Some(-45) }) => {}
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(matches!(s.request(ed, 0x99, Value::Nil), Err(Error::Refused { .. })));
+    }
+
+    #[test]
+    fn a_large_reply_is_reassembled() {
+        let sim = SimDevice::new();
+        let blob: Vec<u8> = (0..9000u32).map(|i| i as u8).collect();
+        let expected = blob.clone();
+        sim.on(2, 0x04, move |_| SimReply::Done(Value::Binary(blob.clone())));
+        let (mut s, lib, _) = open(&sim);
+        assert_eq!(msg::bytes(&s.request(lib, 0x04, Value::Nil).unwrap()), Some(&expected[..]));
+    }
+
+    #[test]
+    fn pump_collects_notifications() {
+        let sim = SimDevice::new();
+        let (mut s, _, _) = open(&sim);
+        let note = int_map(&[(0x69, Value::from(0x16)), (0x6a, Value::from(1))]);
+        assert!(sim.notify(note.clone()));
+        let mut got = Vec::new();
+        for _ in 0..20 {
+            s.pump().unwrap();
+            got.extend(s.take_notifications());
+            if !got.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(got, vec![note]);
     }
 }

@@ -18,6 +18,29 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IN_PACKETS_PER_TRANSFER: usize = 8;
 const IN_TRANSFERS: usize = 2;
 
+/// What a [`crate::session::Session`] needs from the wire: the USB device, or a
+/// simulated one in tests.
+pub trait Link: Send {
+    fn write(&mut self, data: &[u8]) -> Result<()>;
+
+    /// One IN transfer, or `None` if nothing arrived within `timeout`.
+    fn read(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>>;
+
+    fn mtu(&self) -> usize;
+
+    fn product_id(&self) -> u16;
+
+    /// Discard whatever a previous session left in the device's IN queue.
+    fn purge(&mut self, duration: Duration) -> Result<usize> {
+        let end = Instant::now() + duration;
+        let mut n = 0;
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            n += self.read(left.min(Duration::from_millis(100)))?.map_or(0, |b| b.len());
+        }
+        Ok(n)
+    }
+}
+
 pub struct UsbLink {
     ep_out: nusb::Endpoint<Bulk, Out>,
     ep_in: nusb::Endpoint<Bulk, In>,
@@ -43,15 +66,18 @@ impl UsbLink {
         })
     }
 
-    pub fn mtu(&self) -> usize {
+}
+
+impl Link for UsbLink {
+    fn mtu(&self) -> usize {
         self.mtu
     }
 
-    pub fn product_id(&self) -> u16 {
+    fn product_id(&self) -> u16 {
         self.product_id
     }
 
-    pub fn write(&mut self, data: &[u8]) -> Result<()> {
+    fn write(&mut self, data: &[u8]) -> Result<()> {
         let c = self.ep_out.transfer_blocking(Buffer::from(data.to_vec()), WRITE_TIMEOUT);
         c.status?;
         match c.actual_len == data.len() {
@@ -60,8 +86,7 @@ impl UsbLink {
         }
     }
 
-    /// One IN transfer, or `None` if nothing arrived within `timeout`.
-    pub fn read(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>> {
+    fn read(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>> {
         while self.ep_in.pending() < IN_TRANSFERS {
             let buf = self.ep_in.allocate(self.mtu * IN_PACKETS_PER_TRANSFER);
             self.ep_in.submit(buf);
@@ -74,16 +99,6 @@ impl UsbLink {
                 Ok(Some(c.buffer[..n].to_vec()))
             }
         }
-    }
-
-    /// Discard whatever a previous session left in the device's IN queue.
-    pub fn purge(&mut self, duration: Duration) -> Result<usize> {
-        let end = Instant::now() + duration;
-        let mut n = 0;
-        while let Some(left) = end.checked_duration_since(Instant::now()) {
-            n += self.read(left.min(Duration::from_millis(100)))?.map_or(0, |b| b.len());
-        }
-        Ok(n)
     }
 }
 

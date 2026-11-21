@@ -14,6 +14,7 @@ pub mod msg;
 pub mod preset;
 pub mod restore;
 pub mod session;
+pub mod sim;
 pub mod snapshot;
 pub mod stomp;
 pub mod stream;

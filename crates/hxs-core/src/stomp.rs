@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use rmpv::Value;
 
+use crate::link::Link;
 use crate::msg::{self, empty_map, int_map};
 use crate::session::{ChannelId, Port, Session};
 use crate::{Error, Result};
@@ -116,12 +117,31 @@ pub struct Stomp {
 }
 
 impl Stomp {
+    /// The HX Stomp on USB.
     pub fn connect(timeout: Duration) -> Result<Self> {
-        let mut session = Session::open(timeout)?;
+        Self::start(Session::open(timeout)?)
+    }
+
+    /// The editor, librarian and notify channels over any link (a simulated device in tests).
+    pub fn over(link: Box<dyn Link>, timeout: Duration) -> Result<Self> {
+        Self::start(Session::over(link, timeout))
+    }
+
+    fn start(mut session: Session) -> Result<Self> {
         let librarian = session.open_channel(LIBRARIAN)?;
         let editor = session.open_channel(EDITOR)?;
         session.open_notify(NOTIFY)?;
         Ok(Self { session, editor, librarian })
+    }
+
+    /// See [`Session::pump`].
+    pub fn pump(&mut self) -> Result<()> {
+        self.session.pump()
+    }
+
+    /// See [`Session::take_notifications`].
+    pub fn take_notifications(&mut self) -> Vec<Value> {
+        self.session.take_notifications()
     }
 
     pub fn product_id(&self) -> u16 {

@@ -51,6 +51,10 @@ impl Stream {
         self.rx_seq.is_some() && !self.closed_by_peer
     }
 
+    pub fn peer_closed(&self) -> bool {
+        self.closed_by_peer
+    }
+
     pub fn heartbeat_due(&self, now: Instant) -> bool {
         self.is_connected() && now.duration_since(self.last_tx) >= HEARTBEAT_EVERY
     }
