@@ -252,7 +252,7 @@ impl Worker {
                 }
                 self.emit(Event::SettingChanged { id, value });
             }
-            Notification::PresetLoaded { .. } => self.refresh_preset(),
+            Notification::PresetLoaded { setlist, slot } => self.refresh_preset(setlist, slot),
             Notification::PresetRenamed { setlist, slot, name } => {
                 if let Some(entry) = self
                     .state
@@ -269,9 +269,12 @@ impl Worker {
         }
     }
 
-    fn refresh_preset(&mut self) {
+    /// Read the preset the unit reports as loaded. If the unit already holds another
+    /// one, a newer load superseded this report and its own report will follow.
+    fn refresh_preset(&mut self, setlist: u64, slot: u64) {
         let read = self.with_stomp(|s| Ok((s.current_preset()?, s.edit_buffer()?)));
         match read {
+            Ok((current, _)) if (current.setlist, current.slot) != (setlist, slot) => {}
             Ok((current, edit_buffer)) => {
                 if let Some(state) = self.state.as_mut() {
                     state.current = current.clone();
@@ -413,6 +416,24 @@ mod tests {
         let e = wait_for(&events, |e| matches!(e, Event::PresetLoaded { .. }));
         assert!(matches!(e, Event::PresetLoaded { current, .. } if current.slot == 5));
         assert_eq!(handle.state().wait().unwrap().current.slot, 5);
+    }
+
+    fn loaded(slot: u64) -> Value {
+        let payload = int_map(&[(0x6b, Value::from(0)), (0x6c, Value::from(slot))]);
+        let body = int_map(&[(0x52, Value::from(1)), (0x44, Value::from(1)), (0x79, Value::from(6)), (0x6a, payload)]);
+        int_map(&[(0x69, Value::from(4)), (0x6a, body)])
+    }
+
+    #[test]
+    fn a_superseded_load_report_is_not_passed_on() {
+        let slot = Arc::new(Mutex::new(0));
+        let sim = device(slot.clone());
+        let (handle, events) = start(&sim);
+        handle.connect().wait().unwrap();
+        assert!(sim.notify(loaded(5)));
+        assert!(sim.notify(loaded(0)));
+        let e = wait_for(&events, |e| matches!(e, Event::PresetLoaded { .. }));
+        assert!(matches!(e, Event::PresetLoaded { current, .. } if current.slot == 0));
     }
 
     #[test]

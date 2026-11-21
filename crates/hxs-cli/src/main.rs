@@ -203,6 +203,7 @@ fn signature(kind: Option<u64>, note: &Value) -> String {
 fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &AtomicBool) {
     for line in std::io::stdin().lines() {
         let Ok(line) = line else { break };
+        let line = line.trim_start_matches('\u{feff}');
         let words: Vec<&str> = line.split_whitespace().collect();
         let outcome = match words.as_slice() {
             ["quit"] | ["exit"] => {
