@@ -192,6 +192,18 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [fato] `param 4 2 0.25` / `0.006` (editor `0x1e`), `block 4 off` / `on` (`0x29`), `snapshot 2` / `1` (`0x58`) e `select 0`: todos responderam ok, e o aparelho ecoou `ParameterChanged`, `BlockChanged { 4 }` (sem `Footswitch`, porque não veio de um footswitch) e o trio de snapshot. O `select 0` recarregou o preset salvo e descartou as edições; depois, o restore achou os presets, IRs e favoritos idênticos ao backup.
 - [fato] Ao voltar a um snapshot, chegaram cinco eventos `0x22` `{0x4a: origem, 0x47: 4, 0x41: 0, 0x62: bloco, 0x1a, 0x1c: parâmetro, 0x1d: true, 0x81: false, 0x48: mínimo, 0x49: máximo, 0x3b: false}`, com os mínimos e máximos dos controllers do preset. [inferência] São os controllers sendo reaplicados; as chaves batem com o comando 37 do tonepush.
 
+## Snapshots 4–6 ao vivo: pesquisa (2026-11-21, só leitura)
+
+- [fato, `tools/features/more_snapshots.py` 20–23 e 43–44, `src/m4/more_snapshots.s` `snaps_saving`] O HXtra envolve **os dois** serializadores de preset (`0x28dea8c4`, o do salvamento no aparelho, e `0x28deacf4`, o do comando do HX Edit em `0x28e1c5b2`, dentro do handler do `0x16` segundo `docs/research/m4/usb-editor.md`) com uma troca para o banco A antes e de volta ao B depois, quando o banco B está ativo (`snaps_data[0]`).
+- [HXtra, verificado no aparelho para o salvamento] Essa troca se ouve como uma chamada curta do snapshot do banco A.
+- [inferência] Logo, **ler o edit buffer (`0x16`) com o banco B ativo deve produzir o mesmo soluço**, e o edit buffer lido sai sempre com o banco A. O `hxs` lê o `0x16` ao conectar e depois de cada carga de preset; a carga sempre volta ao banco A, então só a leitura da conexão corre esse risco.
+- [fato, `tools/usb_commands.py`] O HXtra só registra os comandos USB `0x51` (entrada de controles) e `0x52` (espelho de tela), e o build v1.2.1 do usuário não tem nenhum dos dois. **Nenhum comando expõe o banco ativo.** Com os eventos dando o mesmo índice nos dois bancos (seção anterior), o banco hoje não é visível pelo USB.
+- [HXtra, verificado no aparelho] MIDI CC 69 com valores 3–5 seleciona os snapshots 4–6; 8 e 9 avançam e voltam atravessando os bancos.
+- [fato] O Windows expõe o MIDI do Stomp sem driver extra: saída `Line 6 HX Stomp 1`, entrada `Line 6 HX Stomp 0` (via `mido`/`python-rtmidi`).
+- Caminhos possíveis para o app:
+  1. selecionar o 4–6 por MIDI CC 69 e acompanhar o banco pelo que o próprio app enviou, mais as cargas de preset (que voltam ao A). As trocas feitas no aparelho, apertando o footswitch aceso, ficariam por inferir;
+  2. contribuir ao HXtra um comando USB (há números livres: `0x13`, `0x1d`, `0x1f`, `0x20`, `0x26`, `0x2c`, `0x36`, `0x37`, `0x4f`, `0x50`, `0x64`, `0x65`) que informe e mude o banco, e talvez leia e grave os registros do banco B ao vivo. Exige build de firmware e conversa com o mantenedor.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
