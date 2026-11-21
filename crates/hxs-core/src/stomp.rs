@@ -28,6 +28,9 @@ mod editor_cmd {
     pub const EDIT_BUFFER: u8 = 0x16;
     pub const CURRENT_PRESET: u8 = 0x17;
     pub const SET_SETTING: u8 = 0x19;
+    pub const SET_PARAMETER: u8 = 0x1e;
+    pub const SET_BLOCK_ENABLED: u8 = 0x29;
+    pub const SELECT_SNAPSHOT: u8 = 0x58;
     pub const GLOBALS: u8 = 0x55;
     pub const GLOBALS_WRITE: u8 = 0x56;
 }
@@ -64,6 +67,12 @@ mod key {
     pub const FLAG_7D: u64 = 0x7d;
     pub const SETTING_ID: u64 = 0x76;
     pub const SETTING_VALUE: u64 = 0x77;
+    pub const BLOCK: u64 = 0x62;
+    pub const COMMIT: u64 = 0x1d;
+    pub const PARAMETER_PATH: u64 = 0x1a;
+    pub const PARAMETER_INDEX: u64 = 0x1c;
+    pub const ENABLED: u64 = 0x3b;
+    pub const SNAPSHOT: u64 = 0x5c;
     pub const FAVORITE_DATA: u64 = 0x22;
     pub const FAVORITE_FLAG: u64 = 0x1f;
     pub const FAVORITE_BLOCK: u64 = 0x40;
@@ -174,6 +183,30 @@ impl Stomp {
     pub fn set_setting(&mut self, id: u64, value: Value) -> Result<()> {
         let params = int_map(&[(key::SETTING_ID, Value::from(id)), (key::SETTING_VALUE, value)]);
         self.session.request(self.editor, editor_cmd::SET_SETTING, params).map(drop)
+    }
+
+    /// Set a block parameter in the edit buffer (editor 0x1e), with the fields its
+    /// notification carries; the value's type must be the parameter's own. Nothing is stored.
+    pub fn set_parameter(&mut self, block: u64, path: u64, index: u64, value: Value) -> Result<()> {
+        let params = int_map(&[
+            (key::BLOCK, Value::from(block)),
+            (key::COMMIT, Value::from(true)),
+            (key::PARAMETER_PATH, Value::from(path)),
+            (key::PARAMETER_INDEX, Value::from(index)),
+            (key::SETTING_VALUE, value),
+        ]);
+        self.session.request(self.editor, editor_cmd::SET_PARAMETER, params).map(drop)
+    }
+
+    /// Turn a block on or off in the edit buffer (editor 0x29). Nothing is stored.
+    pub fn set_block_enabled(&mut self, block: u64, enabled: bool) -> Result<()> {
+        let params = int_map(&[(key::BLOCK, Value::from(block)), (key::ENABLED, Value::from(enabled))]);
+        self.session.request(self.editor, editor_cmd::SET_BLOCK_ENABLED, params).map(drop)
+    }
+
+    /// Recall snapshot `index` (0..2) of the live bank (editor 0x58). Nothing is stored.
+    pub fn select_snapshot(&mut self, index: u64) -> Result<()> {
+        self.session.request(self.editor, editor_cmd::SELECT_SNAPSHOT, int_map(&[(key::SNAPSHOT, Value::from(index))])).map(drop)
     }
 
     pub fn edit_buffer(&mut self) -> Result<Vec<u8>> {

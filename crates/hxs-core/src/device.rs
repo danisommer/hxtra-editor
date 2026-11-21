@@ -77,6 +77,9 @@ enum Request {
     State(Reply<Snapshot>),
     SelectPreset { setlist: u64, slot: usize, reply: Reply<()> },
     SetSetting { id: u64, value: Value, reply: Reply<()> },
+    SetParameter { block: u64, path: u64, index: u64, value: Value, reply: Reply<()> },
+    SetBlockEnabled { block: u64, enabled: bool, reply: Reply<()> },
+    SelectSnapshot { index: u64, reply: Reply<()> },
     Job { run: Job, fail: Box<dyn FnOnce(Error) + Send> },
     Shutdown,
 }
@@ -122,6 +125,19 @@ impl DeviceHandle {
 
     pub fn set_setting(&self, id: u64, value: Value) -> Pending<()> {
         self.ask(|reply| Request::SetSetting { id, value, reply })
+    }
+
+    /// Queued changes of the same parameter are sent as one, the last.
+    pub fn set_parameter(&self, block: u64, path: u64, index: u64, value: Value) -> Pending<()> {
+        self.ask(|reply| Request::SetParameter { block, path, index, value, reply })
+    }
+
+    pub fn set_block_enabled(&self, block: u64, enabled: bool) -> Pending<()> {
+        self.ask(|reply| Request::SetBlockEnabled { block, enabled, reply })
+    }
+
+    pub fn select_snapshot(&self, index: u64) -> Pending<()> {
+        self.ask(|reply| Request::SelectSnapshot { index, reply })
     }
 
     /// Run `f` on the device thread with the connected unit (a backup, a restore...).
@@ -196,6 +212,15 @@ impl Worker {
             }
             Request::SetSetting { id, value, reply } => {
                 let _ = reply.send(self.with_stomp(|s| s.set_setting(id, value)));
+            }
+            Request::SetParameter { block, path, index, value, reply } => {
+                let _ = reply.send(self.with_stomp(|s| s.set_parameter(block, path, index, value)));
+            }
+            Request::SetBlockEnabled { block, enabled, reply } => {
+                let _ = reply.send(self.with_stomp(|s| s.set_block_enabled(block, enabled)));
+            }
+            Request::SelectSnapshot { index, reply } => {
+                let _ = reply.send(self.with_stomp(|s| s.select_snapshot(index)));
             }
             Request::Job { run, fail } => match self.stomp.as_mut() {
                 Some(stomp) => {
@@ -324,25 +349,45 @@ fn breaks_connection(e: &Error) -> bool {
     }
 }
 
-/// Keep only the last setting change of each setting; the dropped ones report success.
-fn coalesce(batch: Vec<Request>) -> Vec<Request> {
-    let last: HashMap<u64, usize> = batch
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| match r {
-            Request::SetSetting { id, .. } => Some((*id, i)),
+/// What a value change writes to: changes with the same target replace each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Target {
+    Setting(u64),
+    Parameter { block: u64, path: u64, index: u64 },
+}
+
+impl Request {
+    fn target(&self) -> Option<Target> {
+        match self {
+            Request::SetSetting { id, .. } => Some(Target::Setting(*id)),
+            Request::SetParameter { block, path, index, .. } => Some(Target::Parameter { block: *block, path: *path, index: *index }),
             _ => None,
-        })
-        .collect();
+        }
+    }
+
+    /// Answer a request that a later one replaced.
+    fn superseded(self) {
+        match self {
+            Request::SetSetting { reply, .. } | Request::SetParameter { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
+            _ => unreachable!("only value changes are superseded"),
+        }
+    }
+}
+
+/// Keep only the last change of each setting and parameter; the dropped ones report success.
+fn coalesce(batch: Vec<Request>) -> Vec<Request> {
+    let last: HashMap<Target, usize> = batch.iter().enumerate().filter_map(|(i, r)| r.target().map(|t| (t, i))).collect();
     batch
         .into_iter()
         .enumerate()
-        .filter_map(|(i, r)| match r {
-            Request::SetSetting { id, reply, .. } if last.get(&id) != Some(&i) => {
-                let _ = reply.send(Ok(()));
+        .filter_map(|(i, r)| match r.target() {
+            Some(t) if last.get(&t) != Some(&i) => {
+                r.superseded();
                 None
             }
-            r => Some(r),
+            _ => Some(r),
         })
         .collect()
 }
@@ -368,6 +413,9 @@ mod tests {
         sim.on(6, 0x55, |_| SimReply::Done(Value::Binary(b"globals".to_vec())));
         sim.on(6, 0x14, |_| SimReply::Pending(Value::Nil));
         sim.on(6, 0x19, |_| SimReply::Done(Value::Nil));
+        sim.on(6, 0x1e, |_| SimReply::Done(Value::Nil));
+        sim.on(6, 0x29, |_| SimReply::Done(Value::Nil));
+        sim.on(6, 0x58, |_| SimReply::Done(Value::Nil));
         sim.on(2, 0x01, |_| {
             let entry = |id: u64, name: &str| int_map(&[(id, int_map(&[(0x6d, Value::from(name))]))]);
             SimReply::Done(Value::Array(vec![entry(2, "Clean\0"), entry(0, "Empty\0")]))
@@ -455,6 +503,37 @@ mod tests {
         let sets: Vec<_> = sim.requests().into_iter().filter(|r| (r.0, r.1) == (6, 0x19)).collect();
         assert_eq!(sets.len(), 1);
         assert_eq!(crate::msg::get(&sets[0].2, 0x77), Some(&Value::F32(129.0)));
+    }
+
+    #[test]
+    fn queued_changes_of_each_parameter_send_only_the_last() {
+        let sim = device(Arc::new(Mutex::new(0)));
+        let (handle, _events) = start(&sim);
+        handle.connect().wait().unwrap();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let blocker = handle.run(move |_| {
+            release_rx.recv().ok();
+            Ok(())
+        });
+        let mut pending = Vec::new();
+        for i in 0..10 {
+            pending.push(handle.set_parameter(4, 0, 2, Value::F32(i as f32 / 10.0)));
+            pending.push(handle.set_parameter(4, 0, 3, Value::F32(1.0 - i as f32 / 10.0)));
+        }
+        pending.push(handle.set_block_enabled(4, false));
+        pending.push(handle.select_snapshot(1));
+        release_tx.send(()).unwrap();
+        blocker.wait().unwrap();
+        for p in pending {
+            p.wait().unwrap();
+        }
+        let sent: Vec<_> = sim.requests().into_iter().filter(|r| r.0 == 6 && [0x1e, 0x29, 0x58].contains(&r.1)).collect();
+        let field = |v: &Value, k| crate::msg::get(v, k).cloned();
+        assert_eq!(sent.len(), 4);
+        assert_eq!((field(&sent[0].2, 0x1c), field(&sent[0].2, 0x77)), (Some(Value::from(2)), Some(Value::F32(0.9))));
+        assert_eq!((field(&sent[1].2, 0x1c), field(&sent[1].2, 0x77)), (Some(Value::from(3)), Some(Value::F32(1.0 - 0.9))));
+        assert_eq!((sent[2].1, field(&sent[2].2, 0x3b)), (0x29, Some(Value::from(false))));
+        assert_eq!((sent[3].1, field(&sent[3].2, 0x5c)), (0x58, Some(Value::from(1))));
     }
 
     #[test]

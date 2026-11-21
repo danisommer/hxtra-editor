@@ -67,7 +67,7 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Print the unit's events live; type `select SLOT`, `set ID VALUE` or `quit`.
+    /// Print the unit's events live; type `select`, `set`, `param`, `block`, `snapshot` or `quit`.
     Monitor {
         /// Stop after this many seconds (0: until `quit`).
         #[arg(long, default_value_t = 0)]
@@ -150,7 +150,7 @@ fn monitor(timeout: Duration, seconds: u64, all: bool, no_input: bool) -> Result
     );
     let quit = Arc::new(AtomicBool::new(false));
     if !no_input {
-        println!("commands: select SLOT | set ID VALUE | quit");
+        println!("commands: {MONITOR_COMMANDS}");
         let (handle, quit, setlist) = (handle.clone(), quit.clone(), snapshot.current.setlist);
         thread::spawn(move || read_commands(&handle, &globals, setlist, &quit));
     }
@@ -250,14 +250,39 @@ fn read_commands(handle: &DeviceHandle, globals: &Globals, setlist: u64, quit: &
                 .map_err(anyhow::Error::from)
                 .and_then(|id| typed_value(globals, id, value).map(|v| (id, v)))
                 .and_then(|(id, v)| Ok(handle.set_setting(id, v).wait()?)),
+            ["param", block, index, value] => (|| {
+                let v = literal_value(value)?;
+                Ok(handle.set_parameter(block.parse()?, 0, index.parse()?, v).wait()?)
+            })(),
+            ["block", block, state @ ("on" | "off")] => {
+                block.parse().map_err(anyhow::Error::from).and_then(|b| Ok(handle.set_block_enabled(b, *state == "on").wait()?))
+            }
+            ["snapshot", n] => match n.parse::<u64>() {
+                Ok(n @ 1..=3) => handle.select_snapshot(n - 1).wait().map_err(anyhow::Error::from),
+                _ => Err(anyhow::anyhow!("snapshot takes 1, 2 or 3 (the live bank's)")),
+            },
             [] => continue,
-            _ => Err(anyhow::anyhow!("commands: select SLOT | set ID VALUE | quit")),
+            _ => Err(anyhow::anyhow!("commands: {MONITOR_COMMANDS}")),
         };
         match outcome {
             Ok(()) => println!("ok: {line}"),
             Err(e) => println!("failed: {line}: {e:#}"),
         }
     }
+}
+
+const MONITOR_COMMANDS: &str =
+    "select SLOT | set ID VALUE | param BLOCK INDEX VALUE (0.5 float, 3 int, true bool) | block BLOCK on|off | snapshot 1-3 | quit";
+
+/// A parameter value typed by how it is written: with a point a float, without one an int,
+/// `true`/`false` a bool (the unit drops a preset given a value of the wrong type).
+fn literal_value(text: &str) -> Result<Value> {
+    Ok(match text {
+        "true" => Value::from(true),
+        "false" => Value::from(false),
+        t if t.contains('.') => Value::F32(t.parse().with_context(|| format!("{t} is not a float"))?),
+        t => Value::from(t.parse::<i64>().with_context(|| format!("{t} is not an int (write floats with a point)"))?),
+    })
 }
 
 /// Parse `text` as the type the setting holds now (the unit drops values of the wrong type).
