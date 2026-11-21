@@ -26,9 +26,16 @@ Ordem sugerida, cada item com captura ou teste no aparelho antes do código:
 - Falta: exibição de pan, blend, posição de microfone e afinação (hoje número cru, até confirmar como o aparelho mostra); confirmar o Trails; User Model Defaults.
 - Limite conhecido: o monitor só relê o edit buffer quando o preset é carregado; se o modelo de um bloco mudar no aparelho, o `param` usa o modelo antigo até a próxima carga.
 
+- ~~Papel `capture` no catálogo (NAM A2 Lite: o knob Model é o slot de IR da captura)~~ (feito).
+- ~~Extrator no navegador (`web/`, Pyodide, GitHub Pages pelo Actions)~~ (feito; o Python empacotado foi testado localmente e sai idêntico. Falta abrir no navegador e ativar o Pages: Settings → Pages → Source: GitHub Actions).
+
+## Etapa 5: interface
+
+- ~~Primeira versão funcional (`hxtra-editor`, egui)~~ (feita, sem cuidado visual): presets, blocos e parâmetros, capturas pelo nome, snapshots 1–6, salvar, backup, restauração com comparação, gravar um preset, IRs, catálogo e globais.
+- Próximo: o usuário testa e aponta problemas; depois, a direção visual.
+
 ## Depois
 
-- Escolher o framework da GUI (o tonepush usa egui: avaliar).
 - Primeiro PR no HXtra: a ordem da lista de presets no `hx_ctl.py`, mais as notas do protocolo (upload `0x08`, conclusão pelo notify, corrida ao recarregar o preset atual).
 - Ler a EULA do HX Edit antes de divulgar.
 

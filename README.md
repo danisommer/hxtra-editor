@@ -46,6 +46,18 @@ order: `--catalog FILE`, `$HXS_CATALOG`, next to the executable, then
 `%APPDATA%\hxtra-editor\`. Without one everything works with numbers for names; a
 catalog made for another firmware version than the unit's is not used.
 
+No catalog is ever shipped: it holds Line 6 data. The page in `web/` (published to GitHub Pages
+by `.github/workflows/pages.yml`) extracts it from your `.hxf` in the browser with Pyodide,
+running this repository's extractor on HXtra's firmware tools at a pinned commit; nothing is
+uploaded. To try it locally:
+
+```
+python web/build_site.py PATH_TO_HXTRA_CHECKOUT work/site
+python -m http.server -d work/site 8000
+```
+
+then open http://localhost:8000.
+
 ## Build
 
 Rust stable (MSVC toolchain on Windows), then:
