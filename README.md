@@ -47,4 +47,4 @@ The device is reached through its WinUSB interface with [nusb](https://crates.io
 
 ## Credits and license
 
-The protocol notes build on the research published by the HXtra project. Licensed under GPL-3.0-or-later (see `LICENSE`).
+The protocol notes build on the research published by the HXtra project and are cross-checked against the protocol notes of [tonepush](https://github.com/crmne/tonepush) (MIT). Licensed under GPL-3.0-or-later (see `LICENSE`).

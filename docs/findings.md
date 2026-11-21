@@ -147,6 +147,18 @@ Ações do usuário no HX Edit: importar um IR e apagá-lo; mudar FS4 Function e
 - [fato] O envelope dos eventos é `{0x52, 0x44, 0x79, 0x6a}`. O tipo `0x16` tem pelo menos dois subtipos: `0x44: 9, 0x79: 0x19` com `{0x76: id, 0x77: valor}` (configuração mudou) e `0x44: 10, 0x79: 0x1b` com payload nil, que chega cerca de 10 vezes por segundo com o aparelho parado. O significado deste último é desconhecido.
 - [fato] A configuração 157 é reportada cerca de 13 vezes por segundo com o aparelho parado, alternando entre 0,19005 e 0,20005.
 
+## Referência externa: tonepush (2026-11-21)
+
+[github.com/crmne/tonepush](https://github.com/crmne/tonepush), MIT: um editor open source em Rust (egui + CLI, `nusb`) para a família HX, testado no HX Stomp 3.80. O `PROTOCOL.md` dele escreve os números em **decimal**. Tudo nesta seção é [tonepush], ou seja, afirmado lá e ainda não verificado por nós, salvo quando marcado.
+
+- **Confirma** o que levantamos (decimal = hex): 1/4/8 presets, 9/11/12/13/15 IRs, 20 = `0x14` carregar preset (conclusão como evento 20), 22/23, 24/25 = `0x18`/`0x19` configurações, 76 = `0x4c` EQ global, 78 = `0x4e` selecionar bloco, 86 = `0x56` globais, 112/113/114/116 = favoritos, 254/255 = lote.
+- **Corrige:** 45 = `0x2d` é "ler um bloco para salvar como favorito", não "remover bloco" (a nossa hipótese).
+- **Acrescenta** (alvo da etapa 3): 30 = `0x1e` set parameter `{98: bloco, 29: true, 26: caminho, 28: índice, 119: valor}`; 40 = `0x28` set model (depois de 78); 41 = `0x29` ligar/desligar bloco `{98, 59}`; 88 = `0x58` selecionar snapshot `{92}`; 6 renomear preset; 5 gravar preset no índice; 16 esvaziar slot; 10 renomear IR; 71 = `0x47` salvar preset `{107, 108, 109}` (citado uma vez só); 33 e 56–62 footswitches (rótulo, tipo, cor do LED); 36, 37 e 64–66 controllers/MIDI; 99 = `0x63` clock MIDI externo.
+- IR: `0x71` é uma soma de palavras u32 das amostras; `0x72` e `0x73` são o tamanho declarado (amostras = 0x72 × 256 × 2^0x73), e dados maiores que o declarado travam o aparelho.
+- Cuidados: 33 frames seguidos sem ler travam o endpoint; 4 KB de notify sem confirmação fazem o aparelho parar; num travamento, só tirar a fonte de 9 V resolve; nunca usar reset de USB; uma mudança no tamanho do arquivo de preset sem acertar a tabela de offsets faz o aparelho lê-lo como vazio.
+- [inferência nossa] O tipo de evento do notify costuma ser o número do comando que causou a mudança: o evento `0x1e` (knob girado, capturado pelo `hxs monitor`) tem exatamente os campos do comando 30; o `0x14` e o `6` seguem o mesmo padrão.
+- **Decisão (2026-11-21):** o projeto segue próprio (caminho A), focado no suporte ao HXtra. O tonepush serve de referência de protocolo e de ideias de GUI, com crédito; o plano não muda.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
