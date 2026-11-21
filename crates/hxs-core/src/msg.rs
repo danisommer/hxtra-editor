@@ -16,6 +16,9 @@ pub mod key {
 }
 
 pub const HEADER_LEN: usize = 8;
+/// No message seen is larger than an IR (8 KiB plus its fields) or a preset file
+/// (under 64 KiB); a header announcing more than this is not a real one.
+pub const MAX_BODY: usize = 1 << 20;
 pub const STATUS_OK: u64 = 0;
 pub const STATUS_PENDING: u64 = 1;
 

@@ -239,6 +239,16 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [fato] O `restore` e o `info` passaram a ler a versão do firmware do arquivo do preset 0 em vez do edit buffer, para não provocar a troca de banco do HXtra.
 - [fato, não reproduzido] Pela segunda vez, uma conexão aberta logo depois de um comando que gravou (o aparelho recarregou o preset atual) ficou em laço por mais de 2 min, com CPU subindo devagar. Com comandos só de leitura, três rodadas seguidas não reproduziram. `HXS_TRACE=1` imprime cada etapa da conexão e dos pedidos para achar o ponto na próxima ocorrência.
 
+## Teste isolado da 113 e o travamento ao reconectar (2026-11-21)
+
+- [fato, `HXS_TRACE`] O travamento ao reconectar parou depois de `channel 0x1002: open attempt 1 (service 4)`, ou seja, na resposta do select do **notify**. [inferência] Um cabeçalho velho no início do stream anunciava um tamanho grande, e como o notify recebe dados sem parar, a leitura desse "corpo" nunca dava timeout (o CPU subia devagar). Correção:
+  - o echo do select precisa anunciar exatamente 1 byte, conferido antes de ler o corpo;
+  - mensagens e notificações acima de 1 MiB são erro de protocolo;
+  - dois testes no simulador cobrem os dois casos.
+- [fato] No mesmo teste, um `select 11` (carregar o "SAVE TEST") recebeu status 1 e nunca a conclusão. Os canais fecharam sem resposta de FIN, e as conexões seguintes falharam com "transfer was cancelled" e depois "endpoint stalled". **Só desligar e religar a fonte do aparelho resolveu**, como o tonepush documenta. Causa desconhecida; o aparelho vinha de um processo morto no meio de uma sessão.
+- [fato] A configuração 113 **não** mudou depois de salvar o "Empty" sem mudanças, nem depois de subir o "SAVE TEST" (cópia do 010) para o slot atual. Mudou de int `0` para float `1.0` logo depois de subir o "Empty" para o slot atual, quando o aparelho o recarregou.
+- [hipótese] Carregar um preset que define um modelo de Variax (seção 5, chave 45: `15` no "Empty", `0` nos AC30) faz o firmware stock aplicar os níveis de corda do Variax do preset (padrão `1.0`) nos registros 111–116, sobrescrevendo os containers do HXtra (`tap_color` 111, `usb_monitor` 112, `preset_color` 113). Só a 113 aparece diferente porque é a única com valor do usuário. Teste proposto: carregar um "Empty" e um AC30 e comparar a 113. Se confirmar, vira relatório para o HXtra.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

@@ -113,13 +113,22 @@ impl Session {
     /// SYN, then the service select and its one-byte echo. Right after another
     /// session closed, the unit was seen to put the start of an older message ahead
     /// of the echo on the new stream; [`Session::open_channel`] then starts over.
+    /// The echo's header is checked before its body is read: a stale header can
+    /// announce any length, and on the notify channel data never stops coming.
     fn select_service(&mut self, id: ChannelId, service: u8) -> Result<()> {
         self.connect(id)?;
         let select = [&msg::header(u16::from(service), 1)[..], &[service]].concat();
         self.send(id, &select)?;
-        match self.read_message(id)?.as_slice() {
+        let header = self.read_exact(id, msg::HEADER_LEN)?;
+        match msg::body_len(&header) {
+            1 => {}
+            n => return Err(Error::Protocol(format!("service {service} select: the echo announces {n} bytes, not 1 ({header:02x?})"))),
+        }
+        let echo = self.read_exact(id, 1)?;
+        self.window_update(id)?;
+        match echo.as_slice() {
             [svc] if *svc == service => Ok(()),
-            other => Err(Error::Protocol(format!("service {service} select: unexpected reply {other:02x?}"))),
+            other => Err(Error::Protocol(format!("service {service} select: unexpected echo {other:02x?}"))),
         }
     }
 
@@ -265,6 +274,9 @@ impl Session {
     fn read_message(&mut self, id: ChannelId) -> Result<Vec<u8>> {
         let header = self.read_exact(id, msg::HEADER_LEN)?;
         let len = msg::body_len(&header);
+        if len > msg::MAX_BODY {
+            return Err(Error::Protocol(format!("a message announces {len} bytes, more than {} ({header:02x?})", msg::MAX_BODY)));
+        }
         let mut body = Vec::with_capacity(len);
         while body.len() < len {
             body.extend(self.read_exact(id, (len - body.len()).min(BODY_CHUNK))?);
@@ -335,6 +347,9 @@ impl Session {
         self.window_update(id)?;
         while self.notify_buf.len() >= msg::HEADER_LEN {
             let len = msg::body_len(&self.notify_buf);
+            if len > msg::MAX_BODY {
+                return Err(Error::Protocol(format!("a notification announces {len} bytes, more than {}", msg::MAX_BODY)));
+            }
             if self.notify_buf.len() < msg::HEADER_LEN + len {
                 break;
             }
@@ -425,6 +440,17 @@ mod tests {
         s.open_notify(NOTIFY).unwrap();
         let ed = s.open_channel(EDITOR).unwrap();
         assert_eq!(s.request(ed, 0x17, Value::Nil).unwrap().as_u64(), Some(1));
+    }
+
+    #[test]
+    fn a_stale_header_announcing_a_huge_length_does_not_hang_the_notify_select() {
+        let sim = SimDevice::new();
+        let before = [&msg::header(4, 0x0040_0000)[..], &[0x82]].concat();
+        sim.stale_select_once(before, vec![0; 64]);
+        let start = std::time::Instant::now();
+        let mut s = Session::over(sim.link(), T);
+        s.open_notify(NOTIFY).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(3), "the select gave up on the bad echo at once");
     }
 
     #[test]
