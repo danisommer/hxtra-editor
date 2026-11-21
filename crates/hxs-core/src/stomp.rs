@@ -71,6 +71,26 @@ pub struct PresetEntry {
     pub slot: usize,
     pub file_id: u64,
     pub name: String,
+    pub flags: ListFlags,
+}
+
+/// The three values each preset list entry carries next to its name (keys
+/// 0x7b, 0x7c, 0x7d; meaning not yet known). `None` when the entry lacks one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct ListFlags {
+    pub flag_7b: Option<bool>,
+    pub flag_7c: Option<bool>,
+    pub flag_7d: Option<u64>,
+}
+
+impl ListFlags {
+    fn from_entry(info: &Value) -> Self {
+        Self {
+            flag_7b: msg::get(info, key::FLAG_7B).and_then(Value::as_bool),
+            flag_7c: msg::get(info, key::FLAG_7C).and_then(Value::as_bool),
+            flag_7d: msg::get(info, key::FLAG_7D).and_then(Value::as_u64),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +151,12 @@ impl Stomp {
         Ok(entries
             .into_iter()
             .enumerate()
-            .map(|(slot, (file_id, info))| PresetEntry { slot, file_id, name: msg::get(info, key::NAME).and_then(msg::text).unwrap_or_default() })
+            .map(|(slot, (file_id, info))| PresetEntry {
+                slot,
+                file_id,
+                name: msg::get(info, key::NAME).and_then(msg::text).unwrap_or_default(),
+                flags: ListFlags::from_entry(info),
+            })
             .collect())
     }
 

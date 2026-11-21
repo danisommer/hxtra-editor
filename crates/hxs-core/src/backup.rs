@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::preset::{DeviceMeta, PresetFile};
-use crate::stomp::Stomp;
+use crate::stomp::{ListFlags, Stomp};
 use crate::{Error, Result, msg};
 
 pub const FORMAT: &str = "hxs-backup";
@@ -46,6 +46,7 @@ pub struct PresetRecord {
     pub slot: usize,
     pub file_id: u64,
     pub name: String,
+    pub list_flags: ListFlags,
     pub bank_b: bool,
     #[serde(flatten)]
     pub file: FileRecord,
@@ -100,6 +101,7 @@ fn collect(stomp: &mut Stomp, dir: &Path, setlist: u64, tool: &str, progress: &m
             slot: entry.slot,
             file_id: entry.file_id,
             name: entry.name.clone(),
+            list_flags: entry.flags,
             bank_b,
             file: write(dir, &format!("presets/{:03}.l6p", entry.slot), parsed.bytes())?,
         });
