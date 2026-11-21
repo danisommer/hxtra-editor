@@ -36,4 +36,4 @@ Ordem sugerida, cada item com captura ou teste no aparelho antes do código:
 - Projeto em `C:\Users\Daniel Sommer\prog\hxtra-software` (Windows, toolchain MSVC fixado com `rustup override`); referências em `C:\Users\Daniel Sommer\prog\hxtra-refs`.
 - Fechar o HX Edit antes de usar o `hxs`.
 - O capturador USB elevado (`scripts/capture.ps1 up`) precisa de UAC a cada nova sessão do Windows.
-- Último backup completo e conferido: `work/backups/2026-11-21-after-restore`. O preset 006 foi salvo depois dele, de propósito.
+- Último backup completo e conferido: `work/backups/2026-11-21-after-restore`. O preset 006, salvo durante o teste do monitor, foi restaurado a partir dele (idêntico byte a byte). A configuração 19, alternada no mesmo teste, ficou `true` (no backup, `false`).
