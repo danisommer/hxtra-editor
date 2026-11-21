@@ -120,6 +120,21 @@ Ações do usuário no HX Edit: importar um IR e apagá-lo; mudar FS4 Function e
   - nos 17 favoritos, só um campo mudou: a chave 28 dentro de `0x40` caiu 1 em todos (1..17 → 0..16). Criar e apagar um favorito pelo HX Edit renumera esse campo. Os parâmetros não mudaram.
 - [em aberto] O `0x77` cria um favorito a partir de um bloco do edit buffer. Ainda não conheço um comando que grave um favorito a partir de dados (para a restauração), nem uma escrita em bloco dos globais.
 
+## Restauração pelo HX Edit e restauração de globais pelo `hxs` (2026-11-21, capturas `13` e `14`)
+
+- [fato] O HX Edit restaurando um `.hxb` (Global Settings, Favorites, User Model Defaults):
+  - globais: editor **`0x56`** `{0x6e: str16(blob)}`. O blob tem o formato da leitura `0x55`, grupos 0–3 com `{id: valor}` na ordem do aparelho, mas leva só **150 das 177** configurações; ficam de fora os valores nil, o 157, o 201 e os IDs 21, 28, 29, 64, 74, 78, 118–125 e 132;
+  - favoritos: librarian **`0x72`** `{0x76: n°, 0x22: favorito, 0x1f: false, 0x6d: nome}`, um por favorito;
+  - User Model Defaults: librarian **`0x6f`**, com os mesmos parâmetros das 1162 consultas `0x6d` do backup, a cerca de 250 ms cada (≈5 min).
+- [fato] Efeito no aparelho, comparando os backups de antes e depois:
+  - os registros 107 e 109 (containers de configurações virtuais do HXtra) passaram de **int para float** (`0 → 0.0`, `810 → 810.0`); o 113 continuou int;
+  - 4 floats arredondados para 3 casas (ex.: BPM global 112,24968 → 112,25);
+  - floats dos favoritos levemente arredondados.
+- [fato, `src/m4/virtual_settings.s`] O HXtra lê uma configuração virtual como **padrão** sempre que o container não é int. Logo, depois da restauração pelo HX Edit, o Breathing Line (container 109: cor 10, movimento 2, velocidade 3) e o DSP meter (107) caem no padrão.
+- [inferência] O ID 16 é o tempo do preset atual (`TempoPreset`) e o ID 28 é o preset atual (`LastActivePreset`); os dois acompanham a navegação. O `hxs` não restaura o 16, embora o HX Edit restaure.
+- [fato] `hxs restore-globals` mandou pelo `0x56` 149 configurações com os bytes originais do backup. Depois disso, **as 149 batem com o backup em valor e tipo**: o 107 e o 109 voltaram a ser int.
+- [fato] A conclusão de um pedido pendente do **editor** chega como notify tipo **`0x14`** (`0x14` e `0x56`); a do **librarian** chega como tipo **`1`** (`0x08` e `0x09`). Na primeira execução, o `hxs` esperava o tipo 1 e acusou timeout, embora a gravação tivesse dado certo; corrigido.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
