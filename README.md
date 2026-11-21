@@ -29,6 +29,12 @@ Early, command line only, Windows tested (HX Stomp, HXtra v1.2.1 on stock 3.80.0
 
 Close HX Edit first: it holds the unit's USB interface while it runs.
 
+`hxtra-editor` (crate `hxs-gui`) is a first, plain window over the same functions: the preset
+list, the current preset's blocks with every parameter (NAM captures pick their IR slot by
+name), snapshots 1–6, save, backup, restore with a comparison first, writing one preset file,
+IRs, the catalog and the global settings. Every write to the unit asks for a confirmation box
+or is an explicit edit.
+
 ### Model catalog
 
 Model and parameter names come from `hxs-catalog.json`, extracted from your own
