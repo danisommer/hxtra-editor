@@ -463,11 +463,17 @@ fn print_block_values(b: &Block, model: Option<&Model>, hidden: bool) {
             None => println!("        [{i}] {}", value_text(v)),
         }
     }
-    let missing: Vec<&str> = model
-        .map(|m| m.params.iter().filter(|p| p.index >= b.params.len() && (p.visible || hidden)).map(|p| p.title.as_str()).collect())
+    let missing: Vec<String> = model
+        .map(|m| {
+            m.params
+                .iter()
+                .filter(|p| p.index >= b.params.len() && (p.visible || hidden))
+                .map(|p| format!("{} {}", p.title, p.format(&Value::from(p.default))))
+                .collect()
+        })
         .unwrap_or_default();
     if !missing.is_empty() {
-        println!("        not in this preset (saved before they existed?): {}", missing.join(", "));
+        println!("        not saved in this preset, the unit loads them at their defaults: {}", missing.join(", "));
     }
     if !b.extras.is_empty() {
         println!("        block values after the model's: {}", b.extras.iter().map(value_text).collect::<Vec<_>>().join(", "));

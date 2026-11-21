@@ -255,13 +255,13 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 
 - [fato] Cada célula de processamento da grade (`preset[0][22]`, tipo `19 = 6`) tem o corpo em `20`: `24 → {23: false, 25: preset_id, 26: -1}`, `9` (1, 8 ou 9; papel desconhecido), `10` ligado/desligado, `11 → {2: total de valores, 3: parâmetros do modelo, 4: [valores]}` e, nos blocos de IR, `27` no lugar de `12`: um hash de 64 dígitos hexadecimais terminado em NUL. [inferência] Identifica o arquivo de IR (SHA-256?). Nos outros blocos, `12` vale `{2: 0, 3: 0, 4: []}`, e às vezes falta.
 - [fato] Os primeiros `3` valores são os parâmetros do modelo, **na ordem dos índices do catálogo** (por slot). Ex.: Deluxe Comp do 010 = Threshold −27,5, Ratio 0, Attack 0,027...; o bloco 4, parâmetro 2 do `0x1e` é esse Attack.
-- [fato] Presets gravados antes do HXtra guardam só os parâmetros que o modelo tinha: o FX Loop com 3 (o catálogo HXtra tem 6: Gate, Threshold, Decay) e o Deluxe Comp com 7 (o catálogo tem 10: Mtr Position/Direction/Size). Os que faltam são exatamente os que o HXtra adiciona. [hipótese] Ao carregar, o aparelho usa o padrão para eles.
+- [fato] Presets gravados antes do HXtra guardam só os parâmetros que o modelo tinha: o FX Loop com 3 (o catálogo HXtra tem 6: Gate, Threshold, Decay) e o Deluxe Comp com 7 (o catálogo tem 10: Mtr Position/Direction/Size). Os que faltam são exatamente os que o HXtra adiciona. Ao carregar, o aparelho usa o padrão para eles (confirmado abaixo).
 - [fato] Quando `2 > 3`, sobra exatamente um bool depois dos parâmetros, e só em delay, reverb e FX loop. [hipótese] É o **Trails** do bloco.
 - [fato] No Echoplex EP-3 (preset_id 94), o aparelho guarda 10 parâmetros, mas o catálogo tem 11: o último, "Dry Thru" (slot 12, oculto), nunca aparece nos presets.
 - [fato] Os 126 presets dizem firmware `0x03800000` na seção 7, inclusive os que têm o FX Loop "pré-HXtra". [inferência] O aparelho carimba a versão atual ao serializar o arquivo, então serve para conferir o catálogo contra o aparelho.
 
 - [fato] `param` tipado pelo catálogo no monitor (preset 000, sem salvar): `param 4 attack 0.5` e `param 4 tone 1` foram recusados sem enviar nada; `param 4 attack 0.05` virou `0x1e` com float, o aparelho ecoou `A4 Deluxe Comp / Attack = 50.0 ms`, e o `select 0` descartou a edição (preset sem "modificado", Attack gravado ainda 27 ms).
-- [em aberto] O Deluxe Comp do 000 foi gravado com 7 parâmetros. Não se sabe se o bloco carregado tem os 3 do HXtra (padrão ao carregar?) nem o que o aparelho faz com um `0x1e` para os índices 7–9 nesse bloco.
+- [fato] O Deluxe Comp do 000 está gravado com 7 parâmetros, mas o bloco **carregado** (edit buffer `0x16`) tem 10: os 3 do HXtra entram com o padrão do catálogo (`0`: Middle, Normal, Off). Um `0x1e` no índice 9 (Mtr Size = 3) teve resposta ok, eco `ParameterChanged {4, 0, 9, 3}`, preset "modificado" e o valor no edit buffer; o `select 0` o descartou. Ou seja: ao carregar, o aparelho completa com o padrão os parâmetros que o arquivo não tem, e eles são editáveis.
 
 ## Em aberto
 
