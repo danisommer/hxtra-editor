@@ -187,6 +187,11 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - Com o aparelho parado, nenhum evento além do ruído conhecido (157 e `0x16/0xa/0x1b`).
 - O `notify.rs` agora decodifica `ParameterChanged`, `BlockMoved`, `SnapshotSelected`, `SnapshotApplied` e `Footswitch`.
 
+## Edição ao vivo pelo `hxs` (2026-11-21, preset 000, sem salvar)
+
+- [fato] `param 4 2 0.25` / `0.006` (editor `0x1e`), `block 4 off` / `on` (`0x29`), `snapshot 2` / `1` (`0x58`) e `select 0`: todos responderam ok, e o aparelho ecoou `ParameterChanged`, `BlockChanged { 4 }` (sem `Footswitch`, porque não veio de um footswitch) e o trio de snapshot. O `select 0` recarregou o preset salvo e descartou as edições; depois, o restore achou os presets, IRs e favoritos idênticos ao backup.
+- [fato] Ao voltar a um snapshot, chegaram cinco eventos `0x22` `{0x4a: origem, 0x47: 4, 0x41: 0, 0x62: bloco, 0x1a, 0x1c: parâmetro, 0x1d: true, 0x81: false, 0x48: mínimo, 0x49: máximo, 0x3b: false}`, com os mínimos e máximos dos controllers do preset. [inferência] São os controllers sendo reaplicados; as chaves batem com o comando 37 do tonepush.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

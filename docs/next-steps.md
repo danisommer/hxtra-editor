@@ -10,12 +10,10 @@
 
 Ordem sugerida, cada item com captura ou teste no aparelho antes do código:
 
-1. Testar os comandos `select` e `set` do `hxs monitor` no aparelho (o `set` grava uma configuração: confirmar antes).
-2. Decodificar os eventos que o monitor mostrou: `0x1e` (parâmetro mudou), `0x31/0x5/0xd` (bloco movido), `0x2a`/`0x17`/`0x2e` (snapshot), `0x05` (preset salvo), `0x1a` (desconhecido). Usar o tonepush como referência e confirmar cada um com uma ação isolada.
+1. ~~Testar `select` e `set`~~ (feito); ~~decodificar parâmetro, bloco movido, snapshot e footswitch~~ (feito); ~~mudar parâmetro, ligar/desligar bloco e selecionar snapshot ao vivo~~ (feito e testado no aparelho).
+2. Ainda a confirmar com ações isoladas: `0x05` (preset salvo), `0x1a`, `0x22` (controllers), `0x17 {0x17: 0}`, e as configurações 19 e 21.
 3. Implementar, na ordem, cada um testado no aparelho num preset de teste:
-   - mudar parâmetro (30 = `0x1e`), já com a junção de comandos repetidos da thread;
-   - ligar/desligar bloco (41 = `0x29`);
-   - selecionar snapshot (88 = `0x58`), incluindo os snapshots 4–6 do HXtra (descobrir como o banco B se comporta por esse comando);
+   - snapshots 4–6 do HXtra: o aparelho reporta o mesmo índice nos dois bancos; descobrir como o app sabe o banco e como selecionar o 4–6 (o `0x58` só aceita 0..2?);
    - trocar modelo (78 + 40);
    - salvar preset (71 = `0x47`?): conferir que, salvando no banco B, os snapshots 4–6 vão para o arquivo (a lógica de troca de banco do firmware).
 4. O espelho de estado (`DeviceState`) passa a aplicar esses eventos ao edit buffer decodificado.
