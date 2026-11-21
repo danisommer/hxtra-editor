@@ -11,6 +11,7 @@ pub mod error;
 pub mod globals;
 pub mod link;
 pub mod msg;
+pub mod notify;
 pub mod preset;
 pub mod restore;
 pub mod session;
