@@ -135,6 +135,13 @@ Ações do usuário no HX Edit: importar um IR e apagá-lo; mudar FS4 Function e
 - [fato] `hxs restore-globals` mandou pelo `0x56` 149 configurações com os bytes originais do backup. Depois disso, **as 149 batem com o backup em valor e tipo**: o 107 e o 109 voltaram a ser int.
 - [fato] A conclusão de um pedido pendente do **editor** chega como notify tipo **`0x14`** (`0x14` e `0x56`); a do **librarian** chega como tipo **`1`** (`0x08` e `0x09`). Na primeira execução, o `hxs` esperava o tipo 1 e acusou timeout, embora a gravação tivesse dado certo; corrigido.
 
+## Restauração completa pelo `hxs` (2026-11-21, captura `15`)
+
+- [fato] `hxs restore work/backups/2026-11-21-check`, com o aparelho já restaurado pelo HX Edit, planejou só 3 ações: os favoritos 01, 03 e 12, os mesmos com floats arredondados pela viagem por JSON do HX Edit. Presets, IRs, os outros favoritos e os globais já batiam.
+- [fato] O librarian `0x72` (gravar favorito) respondeu direto com status 0, sem pendência, um pedido por favorito, entre `0xff` e `0xfe`. Depois, o plano refeito veio vazio: o aparelho bate com o backup.
+- [não testado no aparelho] A gravação de IR pelo `hxs` (`0x0f` + `0x09`): o pedido é igual byte a byte ao do HX Edit (teste unitário), mas nenhum IR diferia.
+- [adiado] User Model Defaults: as 1162 consultas `0x6d` (e as gravações `0x6f`) percorrem uma lista de combinações modelo/cab que o HX Edit traz embutida; gerá-la exige o catálogo do firmware do usuário (etapa 4). O aparelho de teste não tem nenhum User Model Default.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

@@ -21,6 +21,8 @@ Early, command line only, Windows tested (HX Stomp, HXtra v1.2.1 on stock 3.80.0
 | `hxs backup <dir>` | every preset file as stored (with snapshots 4–6), IRs, favorites, globals, plus a manifest with SHA-256 hashes | no |
 | `hxs inspect <file.l6p>` | sections of a preset file and its six snapshots | no (offline) |
 | `hxs restore-preset <file.l6p> --slot N --name NAME` | dry run by default; with `--yes` writes the file into the slot and reads it back to compare byte for byte | yes, one slot |
+| `hxs restore-globals <backup>` | dry run by default; with `--yes` writes the global settings with their original bytes (HX Edit's restore turns some ints into floats and rounds floats) and reads them back | yes |
+| `hxs restore <backup>` | checks every backup file's SHA-256, lists only what differs from the unit (IRs, presets, favorites, global settings); with `--yes` writes that list and compares again | yes, what differs |
 
 Close HX Edit first: it holds the unit's USB interface while it runs.
 
