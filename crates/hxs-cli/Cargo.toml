@@ -1,0 +1,16 @@
+[package]
+name = "hxs-cli"
+description = "Command-line tool for the HX Stomp running HXtra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hxs"
+path = "src/main.rs"
+
+[dependencies]
+hxs-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
