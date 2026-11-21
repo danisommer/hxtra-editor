@@ -14,8 +14,9 @@ work/
 *Zone.Identifier
 
 # Generated catalogs (derived from the user's firmware)
-catalog/
+/catalog/
 *.catalog.json
+hxs-catalog*.json
 
 # Rust
 target/
