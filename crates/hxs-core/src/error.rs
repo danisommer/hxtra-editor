@@ -12,6 +12,8 @@ pub enum Error {
     Stopped,
     #[error("MIDI: {0}")]
     Midi(String),
+    #[error("catalog: {0}")]
+    Catalog(String),
     #[error("USB: {0}")]
     Usb(nusb::Error),
     #[error("USB transfer: {0}")]

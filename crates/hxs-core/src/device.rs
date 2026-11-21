@@ -491,6 +491,7 @@ fn breaks_connection(e: &Error) -> bool {
         Error::NotConnected
         | Error::Stopped
         | Error::Midi(_)
+        | Error::Catalog(_)
         | Error::Refused { .. }
         | Error::Preset(_)
         | Error::Backup(_)
