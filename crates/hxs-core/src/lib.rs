@@ -7,6 +7,7 @@
 //! and [`backup`].
 
 pub mod backup;
+pub mod device;
 pub mod error;
 pub mod globals;
 pub mod link;

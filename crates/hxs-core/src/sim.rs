@@ -46,6 +46,7 @@ struct State {
     outbox: VecDeque<Vec<u8>>,
     handlers: HashMap<(u8, u8), Handler>,
     requests: Vec<(u8, u8, Value)>,
+    unplugged: bool,
 }
 
 struct SimStream {
@@ -88,6 +89,12 @@ impl SimDevice {
         Box::new(self.clone())
     }
 
+    /// From now on every read and write fails, as when the cable is pulled.
+    pub fn unplug(&self) {
+        self.state().unplugged = true;
+        self.shared.1.notify_all();
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.shared.0.lock().expect("the simulated device's lock is never poisoned by its own code")
     }
@@ -97,6 +104,9 @@ impl Link for SimDevice {
     fn write(&mut self, data: &[u8]) -> Result<()> {
         let packets = Packet::decode_all(data)?;
         let mut st = self.state();
+        if st.unplugged {
+            return Err(unplugged());
+        }
         for p in packets {
             st.receive(p)?;
         }
@@ -109,6 +119,9 @@ impl Link for SimDevice {
         let end = Instant::now() + timeout;
         let mut st = self.state();
         loop {
+            if st.unplugged {
+                return Err(unplugged());
+            }
             if let Some(b) = st.outbox.pop_front() {
                 return Ok(Some(b));
             }
@@ -124,6 +137,10 @@ impl Link for SimDevice {
     fn product_id(&self) -> u16 {
         PID_HX_STOMP
     }
+}
+
+fn unplugged() -> Error {
+    Error::Protocol("the simulated device was unplugged".into())
 }
 
 impl State {

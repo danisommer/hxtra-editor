@@ -24,8 +24,10 @@ const NOTE_PRESET_LOADED: u64 = 4;
 const NOTE_PAYLOAD: u64 = 0x6a;
 
 mod editor_cmd {
+    pub const LOAD_PRESET: u8 = 0x14;
     pub const EDIT_BUFFER: u8 = 0x16;
     pub const CURRENT_PRESET: u8 = 0x17;
+    pub const SET_SETTING: u8 = 0x19;
     pub const GLOBALS: u8 = 0x55;
     pub const GLOBALS_WRITE: u8 = 0x56;
 }
@@ -60,6 +62,8 @@ mod key {
     pub const FLAG_7B: u64 = 0x7b;
     pub const FLAG_7C: u64 = 0x7c;
     pub const FLAG_7D: u64 = 0x7d;
+    pub const SETTING_ID: u64 = 0x76;
+    pub const SETTING_VALUE: u64 = 0x77;
     pub const FAVORITE_DATA: u64 = 0x22;
     pub const FAVORITE_FLAG: u64 = 0x1f;
     pub const FAVORITE_BLOCK: u64 = 0x40;
@@ -156,6 +160,20 @@ impl Stomp {
             name: msg::get(&r, key::NAME).and_then(msg::text).unwrap_or_default(),
             modified: msg::get(&r, key::MODIFIED).and_then(Value::as_bool).unwrap_or(false),
         })
+    }
+
+    /// Load a preset into the edit buffer (editor 0x14), as a footswitch or HX Edit does;
+    /// nothing is stored. The unit then reports the load (notifications 8 and 4).
+    pub fn select_preset(&mut self, setlist: u64, slot: usize) -> Result<()> {
+        let params = int_map(&[(key::SETLIST, Value::from(setlist)), (key::PRESET, Value::from(slot as u64))]);
+        self.session.request(self.editor, editor_cmd::LOAD_PRESET, params).map(drop)
+    }
+
+    /// Set one global setting (editor 0x19); the value's MessagePack type must be the
+    /// setting's own (int, float or bool). The unit echoes it as notification 0x16.
+    pub fn set_setting(&mut self, id: u64, value: Value) -> Result<()> {
+        let params = int_map(&[(key::SETTING_ID, Value::from(id)), (key::SETTING_VALUE, value)]);
+        self.session.request(self.editor, editor_cmd::SET_SETTING, params).map(drop)
     }
 
     pub fn edit_buffer(&mut self) -> Result<Vec<u8>> {

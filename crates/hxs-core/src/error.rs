@@ -6,6 +6,10 @@ pub enum Error {
     NotFound,
     #[error("the HX Stomp's editor interface is in use: close HX Edit and Line 6 Updater, then retry")]
     Busy,
+    #[error("not connected to the HX Stomp")]
+    NotConnected,
+    #[error("the device thread has stopped")]
+    Stopped,
     #[error("USB: {0}")]
     Usb(nusb::Error),
     #[error("USB transfer: {0}")]
