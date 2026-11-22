@@ -125,6 +125,56 @@ pub fn power(painter: &Painter, c: Pos2, radius: f32, on: bool, color: Color32) 
     painter.line_segment([c - vec2(0.0, radius * 1.1), c - vec2(0.0, radius * 0.2)], s);
 }
 
+/// Small icons of the edit screen: save, refresh, footswitch, snapshot, tempo, tap, in, out.
+pub fn ui(painter: &Painter, r: Rect, name: &str, color: Color32) {
+    let s = Stroke::new(1.6_f32, color);
+    let r = r.shrink(r.width() * 0.22);
+    let (c, w, h) = (r.center(), r.width(), r.height());
+    match name {
+        "save" => {
+            painter.rect_stroke(r, 2.0, s);
+            painter.rect_stroke(Rect::from_min_max(pos2(r.left() + w * 0.25, r.top()), pos2(r.right() - w * 0.25, r.top() + h * 0.35)), 1.0, s);
+            painter.rect_filled(Rect::from_min_max(pos2(r.left() + w * 0.2, c.y + h * 0.1), pos2(r.right() - w * 0.2, r.bottom() - 2.0)), 1.0, color.linear_multiply(0.5));
+        }
+        "refresh" => {
+            let pts: Vec<Pos2> = (0..=20).map(|i| 0.5 + 4.6 * i as f32 / 20.0).map(|a| c + vec2(a.cos(), a.sin()) * w * 0.45).collect();
+            let end = *pts.last().unwrap_or(&c);
+            line(painter, pts, s);
+            line(painter, vec![end + vec2(-4.0, -1.0), end, end + vec2(1.0, 4.0)], s);
+        }
+        "footswitch" => {
+            painter.circle_stroke(pos2(c.x, r.top() + h * 0.3), w * 0.28, s);
+            painter.rect_stroke(Rect::from_min_max(pos2(r.left(), c.y + h * 0.1), r.right_bottom()), 3.0, s);
+        }
+        "snapshot" => {
+            painter.rect_stroke(Rect::from_min_max(pos2(r.left(), r.top() + h * 0.2), r.right_bottom()), 3.0, s);
+            painter.circle_stroke(pos2(c.x, c.y + h * 0.1), w * 0.22, s);
+            painter.rect_filled(Rect::from_min_size(pos2(r.left() + w * 0.25, r.top()), vec2(w * 0.3, h * 0.2)), 1.0, color);
+        }
+        "tempo" => {
+            line(painter, vec![pos2(r.left() + w * 0.15, r.bottom()), pos2(c.x, r.top()), pos2(r.right() - w * 0.15, r.bottom()), pos2(r.left() + w * 0.15, r.bottom())], s);
+            painter.line_segment([pos2(c.x, r.bottom() - h * 0.15), pos2(r.right() - w * 0.1, r.top() + h * 0.2)], s);
+        }
+        "tap" => {
+            painter.circle_filled(c, w * 0.18, color);
+            for k in 1..3 {
+                painter.circle_stroke(c, w * (0.18 + 0.16 * k as f32), Stroke::new(1.0_f32, color.linear_multiply(1.0 - 0.35 * k as f32)));
+            }
+        }
+        "in" | "out" => {
+            painter.rect_stroke(Rect::from_center_size(c, vec2(w * 0.5, h * 0.9)), 3.0, s);
+            painter.circle_filled(c, w * 0.12, color);
+            let dir = if name == "in" { -1.0 } else { 1.0 };
+            painter.line_segment([c + vec2(dir * w * 0.25, 0.0), c + vec2(dir * w * 0.55, 0.0)], s);
+        }
+        _ => {
+            for k in 0..3 {
+                painter.circle_filled(pos2(c.x, r.top() + h * (0.2 + 0.3 * k as f32)), 2.0, color);
+            }
+        }
+    }
+}
+
 /// The icons of the screen bar.
 pub fn screen(painter: &Painter, r: Rect, name: &str, color: Color32) {
     let s = Stroke::new(1.8_f32, color);

@@ -1,8 +1,10 @@
 //! The edit screen: the preset list, the model browser, the signal chain and the block panel,
-//! and the gestures over them: drag and drop (inserting with push everywhere), Ctrl+C/Ctrl+V,
-//! Delete, Ctrl+Z/Ctrl+Y (the preset's edits) and Ctrl+S.
+//! and the gestures over them: drag and drop (inserting with push everywhere, one block per
+//! column), Ctrl+C/Ctrl+V, Delete, Ctrl+Z/Ctrl+Y (the preset's edits) and Ctrl+S.
 
-use eframe::egui::{Align2, FontId, Key, Modifiers, Rect, Sense, Stroke, pos2, vec2};
+use std::collections::BTreeSet;
+
+use eframe::egui::{Align2, Color32, FontId, Key, Modifiers, Rect, Rounding, Sense, Stroke, pos2, vec2};
 use hxs_core::chain::{self, Layout, Op};
 
 use super::*;
@@ -13,7 +15,7 @@ const NEW_BLOCK: u64 = u64::MAX;
 const TILE: f32 = 62.0;
 const ROW_GAP: f32 = 44.0;
 const IO_WIDTH: f32 = 46.0;
-const CELL: egui::Vec2 = egui::Vec2::new(112.0, 124.0);
+const CELL: egui::Vec2 = egui::Vec2::new(112.0, 128.0);
 const CLIP_MARK: &str = "hxtra-editor";
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -28,7 +30,14 @@ pub(crate) enum Focus {
 pub(crate) enum Drag {
     Block(usize),
     Model { preset_id: u64, cab: Option<u64>, kind: u64, name: String },
-    Preset(usize),
+    Presets(Vec<usize>),
+}
+
+/// Where a model browser is: all categories, a category's subtypes, or a folder's models.
+#[derive(Default, Clone)]
+pub(crate) struct BrowserNav {
+    category: Option<String>,
+    folder: Option<usize>,
 }
 
 #[derive(Default)]
@@ -36,13 +45,17 @@ pub(crate) struct EditorState {
     selected: Option<usize>,
     focus: Focus,
     clip: Option<Block>,
-    preset_clip: Option<usize>,
-    paste_preset: Option<(usize, usize)>,
+    presets_selected: BTreeSet<usize>,
+    preset_anchor: Option<usize>,
+    preset_clip: Vec<usize>,
+    paste_presets: Option<(Vec<usize>, usize)>,
     history: Vec<Vec<Block>>,
     redo: Vec<Vec<Block>>,
     picker: Option<usize>,
     browser_search: String,
     picker_search: String,
+    browser_nav: BrowserNav,
+    picker_nav: BrowserNav,
     footswitch_window: bool,
 }
 
@@ -79,6 +92,37 @@ fn without_data(c: Option<&Catalog>, target: &[Block], ops: Vec<Op>) -> Vec<Op> 
         param.is_some_and(|p| p.kind == ParamKind::Data)
     };
     ops.into_iter().filter(|op| !matches!(op, Op::Set { position, index, .. } if is_data(*position, *index))).collect()
+}
+
+/// Whether `drag` may be dropped on `position` of the chain `layout`.
+fn droppable(layout: &Layout, drag: &Drag, position: usize) -> bool {
+    match drag {
+        Drag::Block(from) => *from == position || chain::insert(layout, *from as u64, Some(*from), position).is_some(),
+        Drag::Model { .. } => chain::insert(layout, NEW_BLOCK, None, position).is_some(),
+        Drag::Presets(_) => false,
+    }
+}
+
+/// A raised tile: shadow, body, a lit top edge and a colored rim.
+fn paint_tile(p: &egui::Painter, r: Rect, rim: Stroke, glow: Option<Color32>) {
+    p.rect_filled(r.translate(vec2(0.0, 3.0)), 10.0, Color32::from_black_alpha(150));
+    if let Some(g) = glow {
+        p.rect_stroke(r.expand(2.0), 12.0, Stroke::new(4.0_f32, g.linear_multiply(0.25)));
+    }
+    p.rect_filled(r, 10.0, theme::TILE);
+    let top = Rect::from_min_max(r.min, pos2(r.right(), r.center().y));
+    p.rect_filled(top, Rounding { nw: 10.0, ne: 10.0, sw: 0.0, se: 0.0 }, Color32::from_white_alpha(8));
+    p.rect_stroke(r, 10.0, rim);
+}
+
+/// A small button drawn as one of our icons.
+fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+    if r.hovered() {
+        ui.painter().rect_filled(rect, 6.0, theme::TILE);
+    }
+    icons::ui(ui.painter(), rect, icon, if r.hovered() { theme::SELECTED } else { theme::TEXT });
+    r.on_hover_text(tip)
 }
 
 /// A gesture on the chain or the panel, handled after drawing.
@@ -134,18 +178,27 @@ impl App {
 
     fn push_history(&mut self) {
         let Some(d) = &self.device else { return };
-        self.ed.history.push(d.blocks.clone());
+        let snapshot = d.blocks.clone();
+        self.remember(snapshot);
+    }
+
+    fn remember(&mut self, blocks: Vec<Block>) {
+        self.ed.history.push(blocks);
         if self.ed.history.len() > HISTORY {
             self.ed.history.remove(0);
         }
         self.ed.redo.clear();
     }
 
-    /// Run edits of the edit buffer on the unit, then read it back for the screen.
-    fn edit_job(&mut self, label: &str, f: impl FnOnce(&mut stomp::Stomp) -> hxs_core::Result<()> + Send + 'static) {
+    fn mark_edited(&mut self) {
         if let Some(d) = self.device.as_mut() {
             d.edited = true;
         }
+    }
+
+    /// Run edits of the edit buffer on the unit, then read it back for the screen.
+    fn edit_job(&mut self, label: &str, f: impl FnOnce(&mut stomp::Stomp) -> hxs_core::Result<()> + Send + 'static) {
+        self.mark_edited();
         self.start_job(label, move |s| {
             f(s)?;
             Ok(JobResult::EditBuffer(s.edit_buffer()?))
@@ -172,28 +225,36 @@ impl App {
             return;
         };
         let (setlist, current) = (d.current.setlist, d.current.slot as usize);
-        let (mut load, mut reorder, mut copy, mut paste, mut export) = (None, None, None, None, None);
+        let modifiers = ui.input(|i| i.modifiers);
+        let (mut click, mut reorder, mut copy, mut paste, mut export) = (None, None, None, None, None);
+        let selected = &self.ed.presets_selected;
         egui::ScrollArea::vertical().id_salt("presets").show(ui, |ui| {
             for p in &d.presets {
-                let r = ui.add(egui::SelectableLabel::new(p.slot == current, format!("{:03}  {}", p.slot, p.name))).interact(Sense::click_and_drag());
-                r.dnd_set_drag_payload(Drag::Preset(p.slot));
+                let text = egui::RichText::new(format!("{:03}  {}", p.slot, p.name));
+                let text = if p.slot == current { text.color(theme::SELECTED).strong() } else { text };
+                let r = ui.add(egui::SelectableLabel::new(selected.contains(&p.slot), text)).interact(Sense::click_and_drag());
+                let group: Vec<usize> = match selected.contains(&p.slot) {
+                    true => selected.iter().copied().collect(),
+                    false => vec![p.slot],
+                };
+                r.dnd_set_drag_payload(Drag::Presets(group));
                 if let Some(drag) = r.dnd_release_payload::<Drag>() {
-                    if let Drag::Preset(from) = *drag {
-                        reorder = Some((from, p.slot));
+                    if let Drag::Presets(slots) = &*drag {
+                        reorder = Some((slots.clone(), p.slot));
                     }
                 }
-                if r.dnd_hover_payload::<Drag>().is_some_and(|d| matches!(*d, Drag::Preset(_))) {
+                if r.dnd_hover_payload::<Drag>().is_some_and(|d| matches!(*d, Drag::Presets(_))) {
                     ui.painter().hline(r.rect.x_range(), r.rect.top(), Stroke::new(2.0_f32, theme::SELECTED));
                 }
                 if r.clicked() {
-                    load = Some(p.slot);
+                    click = Some(p.slot);
                 }
                 r.context_menu(|ui| {
                     if ui.button("Copy  (Ctrl+C)").clicked() {
                         copy = Some(p.slot);
                         ui.close_menu();
                     }
-                    if ui.add_enabled(self.ed.preset_clip.is_some(), egui::Button::new("Paste over this preset  (Ctrl+V)")).clicked() {
+                    if ui.add_enabled(!self.ed.preset_clip.is_empty(), egui::Button::new("Paste over, from here  (Ctrl+V)")).clicked() {
                         paste = Some(p.slot);
                         ui.close_menu();
                     }
@@ -204,27 +265,37 @@ impl App {
                 });
             }
         });
-        if let Some(slot) = load {
+        if let Some(slot) = click {
             self.ed.focus = Focus::Presets;
-            let p = self.handle.select_preset(setlist, slot);
-            self.op(format!("load preset {slot:03}"), p);
+            match (modifiers.command, modifiers.shift, self.ed.preset_anchor) {
+                (_, true, Some(anchor)) => self.ed.presets_selected = (anchor.min(slot)..=anchor.max(slot)).collect(),
+                (true, _, _) => {
+                    if !self.ed.presets_selected.remove(&slot) {
+                        self.ed.presets_selected.insert(slot);
+                    }
+                    self.ed.preset_anchor = Some(slot);
+                }
+                _ => {
+                    self.ed.presets_selected = BTreeSet::from([slot]);
+                    self.ed.preset_anchor = Some(slot);
+                    let p = self.handle.select_preset(setlist, slot);
+                    self.op(format!("load preset {slot:03}"), p);
+                }
+            }
         }
-        if let Some((from, to)) = reorder.filter(|(a, b)| a != b) {
-            let Some(d) = &self.device else { return };
-            let mut order = d.presets.clone();
-            let item = order.remove(from);
-            order.insert(to, item);
-            self.start_job("moving the preset", move |s| {
-                s.reorder_presets(setlist, &order)?;
-                Ok(JobResult::Presets(s.preset_list(setlist)?))
-            });
+        if let Some((group, to)) = reorder {
+            self.move_presets(setlist, group, to);
         }
         if let Some(slot) = copy {
-            self.ed.preset_clip = Some(slot);
+            let group = match self.ed.presets_selected.contains(&slot) {
+                true => self.ed.presets_selected.iter().copied().collect(),
+                false => vec![slot],
+            };
+            self.ed.preset_clip = group;
             ui.ctx().copy_text(CLIP_MARK.into());
         }
         if let Some(to) = paste {
-            self.ed.paste_preset = self.ed.preset_clip.map(|from| (from, to));
+            self.ed.paste_presets = Some((self.ed.preset_clip.clone(), to));
         }
         if let Some((slot, name)) = export {
             self.export_slot = slot;
@@ -233,18 +304,36 @@ impl App {
         }
     }
 
+    /// Move a group of presets together, in their order, to land right before preset `to`.
+    fn move_presets(&mut self, setlist: u64, group: Vec<usize>, to: usize) {
+        let Some(d) = &self.device else { return };
+        let moving: Vec<PresetEntry> = d.presets.iter().filter(|p| group.contains(&p.slot)).cloned().collect();
+        let rest: Vec<PresetEntry> = d.presets.iter().filter(|p| !group.contains(&p.slot)).cloned().collect();
+        let at = rest.iter().filter(|p| p.slot < to).count();
+        let order: Vec<PresetEntry> = rest[..at].iter().chain(&moving).chain(&rest[at..]).cloned().collect();
+        if order.iter().map(|p| p.file_id).eq(d.presets.iter().map(|p| p.file_id)) {
+            return;
+        }
+        self.ed.presets_selected = (at..at + moving.len()).collect();
+        self.ed.preset_anchor = Some(at);
+        self.start_job("moving the presets", move |s| {
+            s.reorder_presets(setlist, &order)?;
+            Ok(JobResult::Presets(s.preset_list(setlist)?))
+        });
+    }
+
     pub(crate) fn browser_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Models");
         ui.add(egui::TextEdit::singleline(&mut self.ed.browser_search).hint_text("search"));
-        ui.weak("Drag a model onto the chain");
         let style = self.style;
-        let Some(c) = self.catalog_in_use() else {
+        let Some(c) = self.catalog.as_ref().filter(|_| !self.catalog_ignored) else {
             ui.weak("Load a catalog (Catalog screen) to browse the models.");
             return;
         };
         let search = self.ed.browser_search.to_lowercase();
+        let nav = &mut self.ed.browser_nav;
         egui::ScrollArea::vertical().id_salt("browser").show(ui, |ui| {
-            model_list(ui, c, style, &search, "browser");
+            model_browser(ui, c, style, &search, nav, "browser");
         });
     }
 
@@ -256,9 +345,8 @@ impl App {
         }
         self.preset_header(ui);
         ui.add_space(6.0);
-        let acts = self.chain_grid(ui);
-        ui.add_space(6.0);
-        let mut acts = acts;
+        let mut acts = self.chain_grid(ui);
+        ui.add_space(10.0);
         acts.extend(self.block_panel(ui));
         for a in acts {
             self.act(a, ui.ctx());
@@ -268,16 +356,17 @@ impl App {
     fn preset_header(&mut self, ui: &mut egui::Ui) {
         let Some(d) = &self.device else { return };
         let (setlist, slot, edited, current_snapshot) = (d.current.setlist, d.current.slot as usize, d.edited, d.snapshot);
-        let names = d.snapshot_names.clone();
+        let names: Vec<String> = d.snapshot_names.iter().take(3).cloned().chain(d.bank_b_names.iter().cloned()).collect();
+        let bank_b = !d.bank_b_names.is_empty();
         let mut save = false;
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.save_name).font(egui::TextStyle::Heading).desired_width(220.0).char_limit(stomp::MAX_PRESET_NAME));
             ui.weak(format!("{:03}{}", slot, if edited { "  edited" } else { "" }));
-            save = ui.button("Save").on_hover_text("Ctrl+S: stores the preset in its slot").clicked();
-            if ui.button("Refresh").on_hover_text("Reads the edit buffer again (briefly interrupts the sound in snapshots 4-6)").clicked() {
+            save = icon_button(ui, "save", "Save (Ctrl+S): stores the preset in its slot").clicked();
+            if icon_button(ui, "refresh", "Read the edit buffer again (briefly interrupts the sound in snapshots 4-6)").clicked() {
                 self.start_job("reading the edit buffer", |s| Ok(JobResult::EditBuffer(s.edit_buffer()?)));
             }
-            if ui.button("Footswitches...").clicked() {
+            if icon_button(ui, "footswitch", "Footswitch labels and colors").clicked() {
                 self.ed.footswitch_window = true;
             }
         });
@@ -286,7 +375,8 @@ impl App {
         }
         let mut job: Option<(bool, u64, String, u64)> = None;
         ui.horizontal(|ui| {
-            ui.label("Snapshots");
+            let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+            icons::ui(ui.painter(), r, "snapshot", theme::MUTED);
             for n in 1..=6u8 {
                 let name = names.get(usize::from(n) - 1).cloned().unwrap_or_default();
                 let text = match name.is_empty() {
@@ -294,7 +384,11 @@ impl App {
                     false => format!("{n} {name}"),
                 };
                 let on = current_snapshot == Some(u64::from(n));
-                let r = ui.selectable_label(on, text).on_hover_text("Click: recall (MIDI CC 69). Right-click: name and color");
+                let tip = match (n > 3, bank_b) {
+                    (true, false) => "Click: recall (MIDI CC 69). This preset has no snapshots 4-6 saved yet, so they have no names.",
+                    _ => "Click: recall (MIDI CC 69). Right-click: name and color",
+                };
+                let r = ui.selectable_label(on, text).on_hover_text(tip);
                 if r.clicked() {
                     let p = self.handle.recall_snapshot(n);
                     self.op(format!("snapshot {n}"), p);
@@ -346,13 +440,14 @@ impl App {
     fn tempo_controls(&mut self, ui: &mut egui::Ui) {
         let Some(d) = self.device.as_mut() else { return };
         let mut writes = Vec::new();
-        ui.label("Tempo");
+        let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+        icons::ui(ui.painter(), r, "tempo", theme::MUTED);
         if let Some(t) = d.preset_tempo.as_mut() {
             if ui.add(egui::DragValue::new(t).range(TEMPO_RANGE).speed(0.1).suffix(" BPM")).on_hover_text("This preset's tempo").changed() {
                 writes.push((SETTING_PRESET_TEMPO, *t));
             }
         }
-        if ui.button("Tap").clicked() {
+        if icon_button(ui, "tap", "Tap tempo: tap at least twice").clicked() {
             let now = Instant::now();
             if self.taps.last().is_some_and(|t| now - *t > TAP_GAP) {
                 self.taps.clear();
@@ -392,8 +487,11 @@ impl App {
     fn chain_grid(&mut self, ui: &mut egui::Ui) -> Vec<Act> {
         let mut acts = Vec::new();
         let style = self.style;
-        let c = self.catalog_in_use();
+        let mut hidden = self.show_hidden;
+        let c = self.catalog.as_ref().filter(|_| !self.catalog_ignored);
         let Some(d) = &self.device else { return acts };
+        let layout = layout_of(&d.blocks);
+        let dragging = egui::DragAndDrop::payload::<Drag>(ui.ctx()).filter(|p| !matches!(**p, Drag::Presets(_)));
         let width = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(vec2(width, 2.0 * TILE + ROW_GAP + 34.0), Sense::hover());
         let slot_w = ((width - 2.0 * IO_WIDTH - 24.0) / chain::ROW_LEN as f32).clamp(TILE + 6.0, 130.0);
@@ -401,6 +499,7 @@ impl App {
         let rows_y = [rect.top() + 6.0, rect.top() + 6.0 + TILE + ROW_GAP];
         let center = |row: usize, idx: usize| pos2(x0 + slot_w * (idx as f32 + 0.5), rows_y[row] + TILE / 2.0);
         let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 12.0, theme::BG);
         let line = Stroke::new(2.0_f32, theme::LINE);
         let parallel = d.blocks.iter().any(|b| ROW_B.contains(&b.position));
         let (in_x, out_x) = (x0 - IO_WIDTH / 2.0 - 6.0, x0 + slot_w * chain::ROW_LEN as f32 + IO_WIDTH / 2.0 + 6.0);
@@ -411,10 +510,10 @@ impl App {
             painter.line_segment([pos2(split_x, center(1, 0).y), pos2(join_x, center(1, 0).y)], line);
             painter.line_segment([pos2(join_x, center(1, 0).y), pos2(join_x, center(0, 0).y)], line);
         }
-        for (x, label) in [(in_x, "In"), (out_x, "Out")] {
+        for (x, icon) in [(in_x, "in"), (out_x, "out")] {
             let r = Rect::from_center_size(pos2(x, center(0, 0).y), vec2(IO_WIDTH, TILE));
-            painter.rect_filled(r, 10.0, theme::TILE);
-            painter.text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(14.0), theme::TEXT);
+            paint_tile(&painter, r, Stroke::new(1.0_f32, theme::LINE), None);
+            icons::ui(&painter, r.shrink(6.0), icon, theme::TEXT);
         }
         for row in 0..2 {
             for idx in 0..chain::ROW_LEN {
@@ -422,31 +521,37 @@ impl App {
                 let tile = Rect::from_center_size(center(row, idx), vec2(TILE, TILE));
                 let id = ui.id().with(("slot", position));
                 let r = ui.interact(tile, id, Sense::click_and_drag());
+                let allowed = dragging.as_ref().is_none_or(|drag| droppable(&layout, drag, position));
                 if let Some(drag) = r.dnd_release_payload::<Drag>() {
-                    acts.push(Act::Drop((*drag).clone(), position));
+                    if droppable(&layout, &drag, position) {
+                        acts.push(Act::Drop((*drag).clone(), position));
+                    }
                 }
                 let block = d.blocks.iter().find(|b| b.position == position);
                 let selected = self.ed.selected == Some(position);
-                let hovering_drop = r.dnd_hover_payload::<Drag>().is_some_and(|p| !matches!(*p, Drag::Preset(_)));
+                let hovering_drop = allowed && r.dnd_hover_payload::<Drag>().is_some_and(|p| !matches!(*p, Drag::Presets(_)));
                 match block {
                     Some(b) => {
                         let category = category_of(c, b.preset_id);
-                        let color = theme::category_color(&category);
-                        let color = if b.enabled { color } else { color.linear_multiply(0.35) };
-                        painter.rect_filled(tile, 10.0, theme::TILE);
-                        let border = match (selected, hovering_drop) {
-                            (_, true) => Stroke::new(3.0_f32, theme::SELECTED),
-                            (true, false) => Stroke::new(3.0_f32, theme::SELECTED),
-                            (false, false) => Stroke::new(2.0_f32, color),
+                        let base = theme::category_color(&category);
+                        let color = if b.enabled { base } else { base.linear_multiply(0.35) };
+                        let rim = match (selected || hovering_drop, b.enabled) {
+                            (true, _) => Stroke::new(3.0_f32, theme::SELECTED),
+                            (false, _) => Stroke::new(2.0_f32, color),
                         };
-                        painter.rect_stroke(tile, 10.0, border);
+                        paint_tile(&painter, tile, rim, b.enabled.then_some(base));
                         icons::category(&painter, tile, &category, color);
                         let name: String = model_name(c, style, b.preset_id).chars().take(16).collect();
-                        painter.text(pos2(tile.center().x, tile.bottom() + 3.0), Align2::CENTER_TOP, name, FontId::proportional(11.0), if b.enabled { theme::TEXT } else { theme::MUTED });
+                        painter.text(pos2(tile.center().x, tile.bottom() + 4.0), Align2::CENTER_TOP, name, FontId::proportional(11.0), if b.enabled { theme::TEXT } else { theme::MUTED });
                         r.dnd_set_drag_payload(Drag::Block(position));
                         let power_at = tile.right_top() + vec2(-11.0, 11.0);
                         let pr = ui.interact(Rect::from_center_size(power_at, vec2(18.0, 18.0)), id.with("power"), Sense::click());
                         icons::power(&painter, power_at, 6.0, b.enabled, theme::ACCENT);
+                        if r.secondary_clicked() {
+                            acts.push(Act::Select(position));
+                        }
+                        let model = c.and_then(|c| c.model(b.preset_id));
+                        r.context_menu(|ui| block_menu(ui, b, c, model, style, &mut hidden, &mut acts));
                         if pr.on_hover_text("On/off").clicked() {
                             acts.push(Act::Toggle(position));
                         } else if r.clicked() {
@@ -454,13 +559,14 @@ impl App {
                         }
                     }
                     None => {
-                        let stroke = match (selected, hovering_drop, r.hovered()) {
-                            (_, true, _) | (true, _, _) => Stroke::new(2.0_f32, theme::SELECTED),
-                            (false, false, true) => Stroke::new(1.5_f32, theme::MUTED),
-                            (false, false, false) => Stroke::new(1.0_f32, egui::Color32::from_gray(52)),
+                        let stroke = match (selected || hovering_drop, r.hovered()) {
+                            (true, _) => Stroke::new(2.0_f32, theme::SELECTED),
+                            (false, true) => Stroke::new(1.5_f32, theme::MUTED),
+                            (false, false) => Stroke::new(1.0_f32, Color32::from_gray(46)),
                         };
+                        painter.rect_filled(tile.shrink(8.0), 8.0, Color32::from_black_alpha(60));
                         painter.rect_stroke(tile.shrink(8.0), 8.0, stroke);
-                        if r.hovered() {
+                        if r.hovered() && dragging.is_none() {
                             painter.text(tile.center(), Align2::CENTER_CENTER, "+", FontId::proportional(22.0), theme::MUTED);
                         }
                         if r.on_hover_text("Click to add a block, or drop one here").clicked() {
@@ -468,8 +574,12 @@ impl App {
                         }
                     }
                 }
+                if !allowed {
+                    painter.rect_filled(tile.expand(2.0), 10.0, Color32::from_black_alpha(170));
+                }
             }
         }
+        self.show_hidden = hidden;
         acts
     }
 
@@ -490,9 +600,10 @@ impl App {
         };
         let model = catalog.and_then(|c| c.model(b.preset_id));
         let category = category_of(catalog, b.preset_id);
-        egui::Frame::none().fill(theme::TILE).rounding(10.0).inner_margin(10.0).show(ui, |ui| {
+        let shadow = egui::epaint::Shadow { offset: vec2(0.0, 4.0), blur: 14.0, spread: 0.0, color: Color32::from_black_alpha(140) };
+        egui::Frame::none().fill(theme::TILE).rounding(12.0).inner_margin(12.0).shadow(shadow).stroke(Stroke::new(1.0_f32, Color32::from_gray(48))).show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+                let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
                 icons::category(ui.painter(), r, &category, theme::category_color(&category));
                 let cab = b.cab.map(|id| format!(" + {}", model_name(catalog, style, id))).unwrap_or_default();
                 ui.weak(format!("{}  {}", position_name(position), if category.is_empty() { "block" } else { &category }));
@@ -562,11 +673,7 @@ impl App {
                     if let Some(v) = before.iter_mut().find(|b| b.position == position).and_then(|b| b.params.get_mut(index)) {
                         *v = old;
                     }
-                    self.ed.history.push(before);
-                    if self.ed.history.len() > HISTORY {
-                        self.ed.history.remove(0);
-                    }
-                    self.ed.redo.clear();
+                    self.remember(before);
                 }
                 let pending = self.handle.set_parameter(position as u64, 0, index as u64, value);
                 self.op(format!("{} parameter {index}", position_name(position)), pending);
@@ -574,7 +681,9 @@ impl App {
             }
             Act::Target(target, label) => {
                 self.push_history();
-                self.reach(target, label);
+                let replaced: Vec<usize> = target.iter().map(|t| t.position).collect();
+                let full: Vec<Block> = blocks.iter().filter(|b| !replaced.contains(&b.position)).cloned().chain(target).collect();
+                self.reach(full, label);
             }
             Act::Favorite(p, name) => self.new_favorite = Some((p as u64, name)),
             Act::Bypass(p, fs) => self.edit_job("assigning the footswitch", move |s| s.assign_bypass(p as u64, fs)),
@@ -587,12 +696,6 @@ impl App {
         }
     }
 
-    fn mark_edited(&mut self) {
-        if let Some(d) = self.device.as_mut() {
-            d.edited = true;
-        }
-    }
-
     fn remove_block(&mut self, p: usize) {
         let has = self.device.as_ref().is_some_and(|d| d.blocks.iter().any(|b| b.position == p));
         if has {
@@ -601,12 +704,12 @@ impl App {
         }
     }
 
-    /// Insert with push: a block moved, or a model added, onto `to`.
+    /// Insert with push, one block per column: a block moved, or a model added, onto `to`.
     fn drop_on(&mut self, drag: Drag, to: usize) {
         let Some(d) = &self.device else { return };
         let layout = layout_of(&d.blocks);
         match drag {
-            Drag::Preset(_) => {}
+            Drag::Presets(_) => {}
             Drag::Block(from) if from == to => {}
             Drag::Block(from) => match chain::insert(&layout, from as u64, Some(from), to) {
                 Some(new) => {
@@ -615,7 +718,7 @@ impl App {
                     self.push_history();
                     self.edit_job("moving the block", move |s| moves.iter().try_for_each(|(a, b)| s.move_block(*a as u64, *b as u64)));
                 }
-                None => self.note(format!("no room to insert there: row {} is full", if ROW_A.contains(&to) { "A" } else { "B" })),
+                None => self.note("no free column to move into".to_owned()),
             },
             Drag::Model { preset_id, cab, kind, name } => match chain::insert(&layout, NEW_BLOCK, None, to) {
                 Some(new) => {
@@ -629,7 +732,7 @@ impl App {
                         s.add_block(target as u64, preset_id, cab, kind)
                     });
                 }
-                None => self.note("no room to insert there: the row is full".to_owned()),
+                None => self.note("no free column: the chain already has a block in every column".to_owned()),
             },
         }
     }
@@ -639,17 +742,19 @@ impl App {
             Focus::Chain => {
                 let block = self.device.as_ref().and_then(|d| d.blocks.iter().find(|b| Some(b.position) == self.ed.selected).cloned());
                 if let Some(b) = block {
-                    self.note(format!("copied {}", position_name(b.position)));
+                    self.note(format!("copied block {}", position_name(b.position)));
                     self.ed.clip = Some(b);
                     ctx.copy_text(CLIP_MARK.into());
                 }
             }
             Focus::Presets => {
-                if let Some(slot) = self.device.as_ref().map(|d| d.current.slot as usize) {
-                    self.note(format!("copied preset {slot:03}"));
-                    self.ed.preset_clip = Some(slot);
-                    ctx.copy_text(CLIP_MARK.into());
-                }
+                let group: Vec<usize> = match self.ed.presets_selected.is_empty() {
+                    false => self.ed.presets_selected.iter().copied().collect(),
+                    true => self.device.as_ref().map(|d| vec![d.current.slot as usize]).unwrap_or_default(),
+                };
+                self.note(format!("copied {} preset(s)", group.len()));
+                self.ed.preset_clip = group;
+                ctx.copy_text(CLIP_MARK.into());
             }
         }
     }
@@ -658,14 +763,16 @@ impl App {
         match self.ed.focus {
             Focus::Chain => {
                 let (Some(clip), Some(p), Some(d)) = (self.ed.clip.clone(), self.ed.selected, &self.device) else { return };
-                let mut target: Vec<Block> = d.blocks.iter().filter(|b| b.position != p).cloned().collect();
-                target.push(Block { position: p, ..clip });
+                let rest: Vec<Block> = d.blocks.iter().filter(|b| b.position != p && chain::column_of(b.position) != chain::column_of(p)).cloned().collect();
+                let target: Vec<Block> = rest.into_iter().chain(std::iter::once(Block { position: p, ..clip })).collect();
                 self.push_history();
                 self.reach(target, "pasting the block");
             }
             Focus::Presets => {
-                let (Some(from), Some(d)) = (self.ed.preset_clip, &self.device) else { return };
-                self.ed.paste_preset = Some((from, d.current.slot as usize));
+                let to = self.ed.presets_selected.first().copied().or_else(|| self.device.as_ref().map(|d| d.current.slot as usize));
+                if let (false, Some(to)) = (self.ed.preset_clip.is_empty(), to) {
+                    self.ed.paste_presets = Some((self.ed.preset_clip.clone(), to));
+                }
             }
         }
     }
@@ -721,7 +828,7 @@ impl App {
 
     pub(crate) fn editor_windows(&mut self, ctx: &egui::Context) {
         self.picker_window(ctx);
-        self.paste_preset_window(ctx);
+        self.paste_presets_window(ctx);
         self.favorite_window(ctx);
         self.footswitch_window(ctx);
     }
@@ -738,8 +845,9 @@ impl App {
                 return;
             };
             let search = self.ed.picker_search.to_lowercase();
+            let nav = &mut self.ed.picker_nav;
             egui::ScrollArea::vertical().show(ui, |ui| {
-                chosen = model_list(ui, c, style, &search, "picker");
+                chosen = model_browser(ui, c, style, &search, nav, "picker");
             });
         });
         match (open, chosen) {
@@ -752,25 +860,36 @@ impl App {
         }
     }
 
-    fn paste_preset_window(&mut self, ctx: &egui::Context) {
-        let (Some((from, to)), Some(d)) = (self.ed.paste_preset, &self.device) else { return };
+    fn paste_presets_window(&mut self, ctx: &egui::Context) {
+        let (Some((sources, to)), Some(d)) = (self.ed.paste_presets.clone(), &self.device) else { return };
         let name = |s: usize| d.presets.get(s).map_or("?".to_owned(), |p| p.name.clone());
-        let (from_name, to_name, setlist) = (name(from), name(to), d.current.setlist);
+        let pairs: Vec<(usize, usize, String, String)> = sources.iter().enumerate().map(|(k, from)| (*from, to + k, name(*from), name(to + k))).collect();
+        let fits = to + sources.len() <= d.presets.len();
+        let setlist = d.current.setlist;
         let (mut paste, mut cancel) = (false, false);
-        egui::Window::new("Paste preset").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            ui.label(format!("Paste {from:03} \"{from_name}\" over {to:03} \"{to_name}\"?"));
-            ui.label(format!("{to:03} \"{to_name}\" is replaced on the unit."));
+        egui::Window::new("Paste presets").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            match fits {
+                true => {
+                    ui.label("These presets are replaced on the unit:");
+                    for (from, dest, from_name, dest_name) in &pairs {
+                        ui.label(format!("{dest:03} \"{dest_name}\"  <-  {from:03} \"{from_name}\""));
+                    }
+                }
+                false => {
+                    ui.label(format!("{} presets do not fit from {to:03} to the end of the list.", sources.len()));
+                }
+            }
             ui.horizontal(|ui| {
-                paste = ui.button("Paste").clicked();
+                paste = ui.add_enabled(fits, egui::Button::new("Paste")).clicked();
                 cancel = ui.button("Cancel").clicked();
             });
         });
         if paste {
-            self.ed.paste_preset = None;
-            self.start_job("pasting the preset", move |s| {
-                let file = s.preset_file(setlist, from)?;
+            self.ed.paste_presets = None;
+            self.start_job("pasting the presets", move |s| {
+                let files = pairs.iter().map(|(from, ..)| s.preset_file(setlist, *from)).collect::<hxs_core::Result<Vec<_>>>()?;
                 s.batch_begin()?;
-                let written = s.upload_preset(setlist, to, &from_name, ListFlags::default(), &file);
+                let written = pairs.iter().zip(&files).try_for_each(|((_, dest, from_name, _), file)| s.upload_preset(setlist, *dest, from_name, ListFlags::default(), file));
                 let ended = s.batch_end();
                 written?;
                 ended?;
@@ -778,7 +897,7 @@ impl App {
             });
         }
         if cancel {
-            self.ed.paste_preset = None;
+            self.ed.paste_presets = None;
         }
     }
 
@@ -840,41 +959,104 @@ impl App {
     }
 }
 
-/// The model browser's folders; each model can be dragged, and a click returns it.
-fn model_list(ui: &mut egui::Ui, c: &Catalog, style: NameStyle, search: &str, salt: &str) -> Option<Drag> {
+/// The model browser in levels: the categories, then a category's subtypes (its folders), then
+/// the models; a category with a single folder goes straight to its models. A search lists the
+/// matching models of every folder. Each model can be dragged; a click returns it.
+fn model_browser(ui: &mut egui::Ui, c: &Catalog, style: NameStyle, search: &str, nav: &mut BrowserNav, salt: &str) -> Option<Drag> {
     let mut clicked = None;
-    for (fi, folder) in c.browser.iter().enumerate() {
-        let items: Vec<(&catalog::FolderItem, String, String)> = folder
-            .items
-            .iter()
-            .filter_map(|it| {
-                let id = it.model?;
-                let name = model_name(Some(c), style, id);
-                let category = category_of(Some(c), id);
-                (search.is_empty() || name.to_lowercase().contains(search)).then_some((it, name, category))
+    let mut item_row = |ui: &mut egui::Ui, it: &catalog::FolderItem| {
+        let Some(id) = it.model else { return };
+        let name = model_name(Some(c), style, id);
+        let category = category_of(Some(c), id);
+        let r = ui
+            .horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                icons::category(ui.painter(), dot, &category, theme::category_color(&category));
+                ui.add(egui::Label::new(&name).selectable(false).sense(Sense::click_and_drag()))
             })
-            .collect();
-        if items.is_empty() {
-            continue;
+            .inner;
+        let drag = Drag::Model { preset_id: id, cab: it.cab, kind: it.kind, name };
+        r.dnd_set_drag_payload(drag.clone());
+        if r.clicked() {
+            clicked = Some(drag);
         }
-        let title = format!("{} / {}", folder.category.as_deref().unwrap_or("?"), folder.folder);
-        egui::CollapsingHeader::new(title).id_salt((salt, fi)).open((!search.is_empty()).then_some(true)).show(ui, |ui| {
-            for (it, name, category) in items {
-                let r = ui
-                    .horizontal(|ui| {
-                        let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 4.0, theme::category_color(&category));
-                        ui.add(egui::Label::new(&name).selectable(false).sense(Sense::click_and_drag()))
-                    })
-                    .inner;
-                let drag = Drag::Model { preset_id: it.model.unwrap_or_default(), cab: it.cab, kind: it.kind, name: name.clone() };
-                r.dnd_set_drag_payload(drag.clone());
-                if r.clicked() {
-                    clicked = Some(drag);
+    };
+    if !search.is_empty() {
+        for f in &c.browser {
+            for it in f.items.iter().filter(|it| it.model.is_some_and(|m| model_name(Some(c), style, m).to_lowercase().contains(search))) {
+                item_row(ui, it);
+            }
+        }
+        return clicked;
+    }
+    let folders_of = |cat: &str| -> Vec<usize> { c.browser.iter().enumerate().filter(|(_, f)| f.category.as_deref() == Some(cat)).map(|(i, _)| i).collect() };
+    let mut categories: Vec<String> = Vec::new();
+    for f in &c.browser {
+        if let Some(cat) = &f.category {
+            if !categories.contains(cat) {
+                categories.push(cat.clone());
+            }
+        }
+    }
+    let color_of = |fi: usize| c.browser[fi].items.iter().find_map(|it| it.model).map(|m| category_of(Some(c), m)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        if ui.link("All").clicked() {
+            *nav = BrowserNav::default();
+        }
+        if let Some(cat) = nav.category.clone() {
+            ui.weak(">");
+            let several = folders_of(&cat).len() > 1;
+            match several && nav.folder.is_some() {
+                true => {
+                    if ui.link(&cat).clicked() {
+                        nav.folder = None;
+                    }
+                }
+                false => {
+                    ui.strong(&cat);
                 }
             }
-        });
+            if let (true, Some(fi)) = (several, nav.folder) {
+                ui.weak(">");
+                ui.strong(&c.browser[fi].folder);
+            }
+        }
+    });
+    ui.separator();
+    match (nav.category.clone(), nav.folder) {
+        (None, _) => {
+            for cat in &categories {
+                let folders = folders_of(cat);
+                let count: usize = folders.iter().map(|fi| c.browser[*fi].items.len()).sum();
+                let category = folders.first().map(|fi| color_of(*fi)).unwrap_or_default();
+                let r = ui
+                    .horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+                        icons::category(ui.painter(), r, &category, theme::category_color(&category));
+                        ui.add(egui::Label::new(format!("{cat}  ({count})")).selectable(false).sense(Sense::click()))
+                    })
+                    .inner;
+                if r.clicked() {
+                    nav.category = Some(cat.clone());
+                    nav.folder = (folders.len() == 1).then(|| folders[0]);
+                }
+            }
+        }
+        (Some(cat), None) => {
+            for fi in folders_of(&cat) {
+                let f = &c.browser[fi];
+                if ui.add(egui::Label::new(format!("{}  ({})", f.folder, f.items.len())).selectable(false).sense(Sense::click())).clicked() {
+                    nav.folder = Some(fi);
+                }
+            }
+        }
+        (Some(_), Some(fi)) => {
+            for it in &c.browser[fi].items {
+                item_row(ui, it);
+            }
+        }
     }
+    let _ = salt;
     clicked
 }
 
@@ -971,7 +1153,7 @@ fn capture_select(ui: &mut egui::Ui, id: egui::Id, v: &mut Value, number: f64, i
     knob::Touch { changed, began: changed }
 }
 
-/// The block panel's "..." menu.
+/// A block's menu (its "..." button and a right-click on it in the chain).
 fn block_menu(ui: &mut egui::Ui, b: &Block, c: Option<&Catalog>, model: Option<&Model>, style: NameStyle, hidden: &mut bool, acts: &mut Vec<Act>) {
     let p = b.position;
     if let (Some(c), Some(m)) = (c, model) {
@@ -1010,10 +1192,12 @@ fn block_menu(ui: &mut egui::Ui, b: &Block, c: Option<&Catalog>, model: Option<&
     }
     ui.separator();
     if ui.button("Copy  (Ctrl+C)").clicked() {
+        acts.push(Act::Select(p));
         acts.push(Act::Copy);
         ui.close_menu();
     }
     if ui.button("Paste over it  (Ctrl+V)").clicked() {
+        acts.push(Act::Select(p));
         acts.push(Act::Paste);
         ui.close_menu();
     }
@@ -1077,7 +1261,8 @@ pub(crate) fn paint_drag_ghost(ctx: &egui::Context) {
     let text = match &*drag {
         Drag::Block(p) => format!("block {}", position_name(*p)),
         Drag::Model { name, .. } => name.clone(),
-        Drag::Preset(s) => format!("preset {s:03}"),
+        Drag::Presets(s) if s.len() == 1 => format!("preset {:03}", s[0]),
+        Drag::Presets(s) => format!("{} presets", s.len()),
     };
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-ghost")));
     let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), theme::TEXT);

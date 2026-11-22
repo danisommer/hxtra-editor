@@ -103,28 +103,50 @@ pub fn knob(
     touch
 }
 
+/// A knob with some depth: a drop shadow, a ribbed skirt with ticks, a cap lit from the top
+/// left, the value arc with a glow, and a pointer.
 fn paint_dial(ui: &egui::Ui, c: Pos2, t: f32, hot: bool) {
     let p = ui.painter();
-    let radius = DIAL * 0.42;
-    p.circle_filled(c, radius, if hot { Color32::from_gray(48) } else { Color32::from_gray(40) });
+    let radius = DIAL * 0.40;
     let start = 0.75 * PI;
-    let arc = |from: f32, to: f32| -> Vec<Pos2> {
-        (0..=32).map(|i| from + (to - from) * i as f32 / 32.0).map(|a| c + vec2(a.cos(), a.sin()) * (radius + 3.0)).collect()
-    };
-    p.add(Shape::line(arc(start, start + SWEEP), Stroke::new(3.0_f32, Color32::from_gray(64))));
-    p.add(Shape::line(arc(start, start + SWEEP * t), Stroke::new(3.0_f32, theme::ACCENT)));
+    let arc = |from: f32, to: f32, r: f32| -> Vec<Pos2> { (0..=40).map(|i| from + (to - from) * i as f32 / 40.0).map(|a| c + vec2(a.cos(), a.sin()) * r).collect() };
+    for k in 0..=10 {
+        let a = start + SWEEP * k as f32 / 10.0;
+        let (inner, outer) = (radius + 5.5, radius + if k % 5 == 0 { 9.0 } else { 7.5 });
+        p.line_segment([c + vec2(a.cos(), a.sin()) * inner, c + vec2(a.cos(), a.sin()) * outer], Stroke::new(1.0_f32, Color32::from_gray(80)));
+    }
+    p.add(Shape::line(arc(start, start + SWEEP, radius + 3.5), Stroke::new(3.0_f32, Color32::from_gray(44))));
+    p.add(Shape::line(arc(start, start + SWEEP * t, radius + 3.5), Stroke::new(6.0_f32, theme::ACCENT.linear_multiply(0.25))));
+    p.add(Shape::line(arc(start, start + SWEEP * t, radius + 3.5), Stroke::new(3.0_f32, theme::ACCENT)));
+    p.circle_filled(c + vec2(1.5, 3.0), radius, Color32::from_black_alpha(140));
+    p.circle_filled(c, radius, Color32::from_gray(22));
+    let lift = if hot { 12 } else { 0 };
+    for k in 0..14 {
+        let f = k as f32 / 13.0;
+        let rad = radius * (0.96 - 0.62 * f);
+        let shade = 38 + (52.0 * f) as u8 + lift;
+        p.circle_filled(c - vec2(radius * 0.18 * f, radius * 0.22 * f), rad, Color32::from_gray(shade));
+    }
+    p.circle_stroke(c, radius, Stroke::new(1.0_f32, Color32::from_gray(70)));
     let a = start + SWEEP * t;
-    p.line_segment([c + vec2(a.cos(), a.sin()) * radius * 0.25, c + vec2(a.cos(), a.sin()) * radius * 0.9], Stroke::new(2.5_f32, theme::TEXT));
+    let dir = vec2(a.cos(), a.sin());
+    p.line_segment([c + dir * radius * 0.2, c + dir * radius * 0.88], Stroke::new(3.0_f32, Color32::from_black_alpha(120)));
+    p.line_segment([c + dir * radius * 0.2, c + dir * radius * 0.86], Stroke::new(2.0_f32, theme::TEXT));
+    p.circle_filled(c + dir * radius * 0.86, 1.8, theme::TEXT);
 }
 
 /// An on/off switch; `true` when clicked.
 pub fn switch(ui: &mut egui::Ui, on: &mut bool) -> Touch {
     let (rect, r) = ui.allocate_exact_size(vec2(44.0, 22.0), Sense::click());
     let p = ui.painter();
-    let fill = if *on { theme::ACCENT } else { Color32::from_gray(60) };
+    let fill = if *on { theme::ACCENT } else { Color32::from_gray(48) };
+    p.rect_filled(rect.translate(vec2(0.0, 2.0)), 11.0, Color32::from_black_alpha(120));
     p.rect_filled(rect, 11.0, fill);
+    p.rect_filled(rect.shrink2(vec2(3.0, 0.0)).with_max_y(rect.center().y), 8.0, Color32::from_white_alpha(14));
     let knob_x = if *on { rect.right() - 11.0 } else { rect.left() + 11.0 };
-    p.circle_filled(pos2(knob_x, rect.center().y), 8.0, theme::TEXT);
+    p.circle_filled(pos2(knob_x, rect.center().y + 1.5), 8.0, Color32::from_black_alpha(120));
+    p.circle_filled(pos2(knob_x, rect.center().y), 8.0, Color32::from_gray(210));
+    p.circle_filled(pos2(knob_x - 2.0, rect.center().y - 2.0), 4.0, Color32::from_gray(245));
     ui.label(egui::RichText::new(if *on { "On" } else { "Off" }).small());
     match r.clicked() {
         true => {

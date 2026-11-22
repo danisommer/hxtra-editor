@@ -19,7 +19,7 @@ use hxs_core::device::{DeviceHandle, Event, Options, Pending, Snapshot, snapshot
 use hxs_core::globals::Globals;
 use hxs_core::nam;
 use hxs_core::notify::Notification;
-use hxs_core::preset::{Block, PresetFile, ROW_A, ROW_B};
+use hxs_core::preset::{Block, PresetFile, ROW_B};
 use hxs_core::restore::{self, Plan};
 use hxs_core::snapshot;
 use hxs_core::stomp::{self, CurrentPreset, IndexedEntry, ListFlags, PresetEntry};
@@ -63,6 +63,7 @@ enum JobResult {
     Favorites(Vec<FavoriteView>),
     Lists(Vec<IrSlot>, Vec<FavoriteView>),
     Presets(Vec<PresetEntry>),
+    BankB(usize, Vec<String>),
 }
 
 #[derive(Clone)]
@@ -123,6 +124,9 @@ fn read_irs(s: &mut stomp::Stomp) -> hxs_core::Result<JobResult> {
 }
 
 const FOOTSWITCHES: u64 = 5;
+/// Moves the unit reports smaller than this share of a knob's range do not move it on screen:
+/// an expression pedal at rest reports neighbouring values back and forth.
+const DISPLAY_HYSTERESIS: f64 = 0.01;
 
 struct Device {
     current: CurrentPreset,
@@ -135,6 +139,19 @@ struct Device {
     edited: bool,
     preset_tempo: Option<f32>,
     global_bpm: Option<f32>,
+    /// The names of snapshots 4..6 from the stored preset (the edit buffer read lacks bank B);
+    /// empty when the preset has no bank B.
+    bank_b_names: Vec<String>,
+}
+
+/// The names of the stored preset's snapshots 4..6, or none without a bank B.
+fn read_bank_b_names(s: &mut stomp::Stomp, setlist: u64, slot: usize) -> hxs_core::Result<JobResult> {
+    let p = PresetFile::parse(s.preset_file(setlist, slot)?)?;
+    let names = match p.has_bank_b() {
+        true => snapshot::snapshots(&p)?.into_iter().filter(|s| s.bank == snapshot::Bank::B).map(|s| s.name).collect(),
+        false => Vec::new(),
+    };
+    Ok(JobResult::BankB(slot, names))
 }
 
 struct App {
@@ -313,13 +330,21 @@ impl App {
             edited: false,
             preset_tempo,
             global_bpm,
+            bank_b_names: Vec::new(),
         });
         self.catalog_ignored = false;
         self.check_catalog();
+        self.read_bank_b();
         self.start_job("reading the IR list and the favorites", |s| match (read_irs(s)?, read_favorites(s)?) {
             (JobResult::Irs(irs), JobResult::Favorites(favorites)) => Ok(JobResult::Lists(irs, favorites)),
             _ => unreachable!("read_irs and read_favorites return their own variants"),
         });
+    }
+
+    fn read_bank_b(&mut self) {
+        if let Some((setlist, slot)) = self.device.as_ref().map(|d| (d.current.setlist, d.current.slot as usize)) {
+            self.start_job("reading snapshots 4-6", move |s| read_bank_b_names(s, setlist, slot));
+        }
     }
 
     fn load_edit_buffer(&mut self, bytes: Vec<u8>) {
@@ -389,6 +414,11 @@ impl App {
                         d.presets = list;
                     }
                 }
+                Ok(JobResult::BankB(slot, names)) => {
+                    if let Some(d) = self.device.as_mut().filter(|d| d.current.slot as usize == slot) {
+                        d.bank_b_names = names;
+                    }
+                }
                 Ok(JobResult::Lists(irs, f)) => {
                     self.note(format!("{label}: {} IR slots, {} favorites", irs.len(), f.len()));
                     self.irs = irs;
@@ -413,8 +443,10 @@ impl App {
                     d.current = current;
                     d.edited = false;
                     d.snapshot = Some(1);
+                    d.bank_b_names.clear();
                 }
                 self.load_edit_buffer(edit_buffer);
+                self.read_bank_b();
             }
             Event::SettingChanged { id, value } => {
                 let v = value.as_f64().map(|v| v as f32);
@@ -439,10 +471,20 @@ impl App {
                 }
             }
             Event::Notified(Notification::ParameterChanged { block, path: 0, index, value }) => {
+                let catalog = self.catalog.as_ref().filter(|_| !self.catalog_ignored);
                 if let Some(d) = self.device.as_mut() {
                     d.edited = true;
-                    if let Some(v) = d.blocks.iter_mut().find(|b| b.position as u64 == block).and_then(|b| b.params.get_mut(index as usize)) {
-                        *v = value;
+                    if let Some(b) = d.blocks.iter_mut().find(|b| b.position as u64 == block) {
+                        let range = catalog.and_then(|c| c.model(b.preset_id)).and_then(|m| m.param(index as usize)).filter(|p| p.kind == ParamKind::Float).map(|p| (p.max - p.min).abs());
+                        if let Some(v) = b.params.get_mut(index as usize) {
+                            let jitter = match (range, v.as_f64(), value.as_f64()) {
+                                (Some(range), Some(old), Some(new)) => (new - old).abs() < range * DISPLAY_HYSTERESIS,
+                                _ => false,
+                            };
+                            if !jitter {
+                                *v = value;
+                            }
+                        }
                     }
                 }
             }

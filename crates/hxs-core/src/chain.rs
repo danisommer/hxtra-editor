@@ -1,5 +1,7 @@
-//! The signal chain's grid as an editor sees it: two rows of eight positions, inserting with
-//! push, the moves that reach a layout, and the edits that turn one chain into another (undo).
+//! The signal chain's grid as an editor sees it: eight columns, each holding at most one block,
+//! on row A or row B ([fact, user's report] the unit drops a block when another one takes its
+//! column); inserting with push along the columns, the moves that reach a layout, and the
+//! edits that turn one chain into another (undo).
 
 use std::collections::BTreeMap;
 
@@ -34,59 +36,89 @@ pub fn all_positions() -> impl Iterator<Item = usize> {
     ROW_A.chain(ROW_B)
 }
 
-/// `item` (now at `from`, or new) put at `target`. An empty target just takes it; on an
-/// occupied one it lands right before the block that was there, which with the blocks after it
-/// moves forward to the first free position; without room ahead, the blocks before it move back
-/// instead. `None` when the row has no room at all.
-pub fn insert(layout: &Layout, item: u64, from: Option<usize>, target: usize) -> Option<Layout> {
-    let (row, i) = row_of(target)?;
-    let mut out = layout.clone();
-    if let Some(f) = from {
-        out.remove(&f);
-    }
-    let mut slots: Vec<Option<u64>> = (0..ROW_LEN).map(|k| out.remove(&position(row, k))).collect();
-    let ahead = (i + 1..ROW_LEN).find(|&j| slots[j].is_none());
-    let behind = (0..i).rev().find(|&k| slots[k].is_none());
-    match (slots[i], ahead, behind) {
-        (None, _, _) => slots[i] = Some(item),
-        (Some(_), Some(j), _) => {
-            for k in (i + 1..=j).rev() {
-                slots[k] = slots[k - 1];
-            }
-            slots[i] = Some(item);
-        }
-        (Some(_), None, Some(k)) => {
-            for m in k..i - 1 {
-                slots[m] = slots[m + 1];
-            }
-            slots[i - 1] = Some(item);
-        }
-        (Some(_), None, None) => return None,
-    }
-    out.extend(slots.into_iter().enumerate().filter_map(|(k, s)| s.map(|id| (position(row, k), id))));
-    Some(out)
+pub fn column_of(position: usize) -> Option<usize> {
+    row_of(position).map(|(_, c)| c)
 }
 
-/// Moves to empty positions only (what the unit takes, editor 0x2b) that bring every item of
-/// `target` found in `current` to its place; a cycle goes through a free position.
+/// The block of each column, with its row.
+fn columns(layout: &Layout) -> Vec<Option<(usize, u64)>> {
+    let mut cols = vec![None; ROW_LEN];
+    for (p, id) in layout {
+        if let Some((row, c)) = row_of(*p) {
+            cols[c] = Some((row, *id));
+        }
+    }
+    cols
+}
+
+fn from_columns(cols: &[Option<(usize, u64)>]) -> Layout {
+    cols.iter().enumerate().filter_map(|(c, s)| s.map(|(row, id)| (position(row, c), id))).collect()
+}
+
+/// `item` (now at `from`, or new) put at `target`, one block per column:
+/// - a free column just takes it;
+/// - a block moved onto the other row of an occupied column swaps columns with the block there;
+/// - otherwise it takes that column, right before the block that held it, which moves forward
+///   with the blocks after it (each keeping its row) up to the first free column; without a free
+///   column ahead, the blocks before it move back instead.
+///
+/// `None` when there is no free column to push into.
+pub fn insert(layout: &Layout, item: u64, from: Option<usize>, target: usize) -> Option<Layout> {
+    let (row, j) = row_of(target)?;
+    let mut rest = layout.clone();
+    if let Some(f) = from {
+        rest.remove(&f);
+    }
+    let mut cols = columns(&rest);
+    let ahead = (j + 1..ROW_LEN).find(|&k| cols[k].is_none());
+    let behind = (0..j).rev().find(|&k| cols[k].is_none());
+    let swap_to = from.and_then(column_of).filter(|_| !layout.contains_key(&target));
+    match (cols[j], swap_to, ahead, behind) {
+        (None, _, _, _) => cols[j] = Some((row, item)),
+        (Some(other), Some(back), _, _) if back != j => {
+            cols[back] = Some(other);
+            cols[j] = Some((row, item));
+        }
+        (Some(_), _, Some(k), _) => {
+            for m in (j + 1..=k).rev() {
+                cols[m] = cols[m - 1];
+            }
+            cols[j] = Some((row, item));
+        }
+        (Some(_), _, None, Some(k)) => {
+            for m in k..j - 1 {
+                cols[m] = cols[m + 1];
+            }
+            cols[j - 1] = Some((row, item));
+        }
+        (Some(_), _, None, None) => return None,
+    }
+    Some(from_columns(&cols))
+}
+
+/// Moves (editor 0x2b) that bring every item of `target` found in `current` to its place, each
+/// to a position whose column no other block holds at that moment; a cycle goes through a free
+/// column.
 pub fn plan_moves(current: &Layout, target: &Layout) -> Vec<(usize, usize)> {
     let mut at: BTreeMap<u64, usize> = current.iter().map(|(p, id)| (*id, *p)).collect();
     let want: BTreeMap<u64, usize> = target.iter().filter(|(_, id)| at.contains_key(id)).map(|(p, id)| (*id, *p)).collect();
+    let free_for = |at: &BTreeMap<u64, usize>, id: u64, p: usize| at.iter().all(|(other, q)| *other == id || column_of(*q) != column_of(p));
     let mut moves = Vec::new();
     for _ in 0..4 * all_positions().count() {
-        let occupied: Vec<usize> = at.values().copied().collect();
         let misplaced: Vec<(u64, usize, usize)> = want.iter().filter(|(id, p)| at[id] != **p).map(|(id, p)| (*id, at[id], *p)).collect();
         let Some(&(first, from_first, _)) = misplaced.first() else { break };
-        let (id, from, to) = match misplaced.iter().find(|(_, _, to)| !occupied.contains(to)) {
-            Some(&m) => m,
+        let step = match misplaced.iter().find(|(id, _, to)| free_for(&at, *id, *to)) {
+            Some(&m) => Some(m),
             None => {
-                let parking = all_positions().find(|p| !occupied.contains(p) && !want.values().any(|w| w == p));
-                match parking {
-                    Some(p) => (first, from_first, p),
-                    None => break,
-                }
+                let (row, _) = row_of(from_first).unwrap_or((0, 0));
+                let wanted_cols: Vec<Option<usize>> = want.values().map(|p| column_of(*p)).collect();
+                (0..ROW_LEN)
+                    .map(|c| position(row, c))
+                    .find(|p| free_for(&at, first, *p) && !wanted_cols.contains(&column_of(*p)))
+                    .map(|p| (first, from_first, p))
             }
         };
+        let Some((id, from, to)) = step else { break };
         at.insert(id, to);
         moves.push((from, to));
     }
@@ -162,40 +194,52 @@ mod tests {
     }
 
     #[test]
-    fn dropping_on_an_empty_position_just_moves() {
+    fn dropping_on_a_free_column_just_moves() {
         assert_eq!(insert(&layout(&[(1, 10)]), 10, Some(1), 4), Some(layout(&[(4, 10)])));
+        assert_eq!(insert(&layout(&[(1, 10)]), 10, Some(1), 14), Some(layout(&[(14, 10)])), "to row B");
     }
 
     #[test]
-    fn dropping_on_a_block_inserts_before_it_and_pushes_forward() {
-        let l = layout(&[(1, 10), (2, 20), (3, 30), (6, 60)]);
-        assert_eq!(insert(&l, 99, None, 2), Some(layout(&[(1, 10), (2, 99), (3, 20), (4, 30), (6, 60)])));
-        assert_eq!(insert(&l, 60, Some(6), 1), Some(layout(&[(1, 60), (2, 10), (3, 20), (4, 30)])), "the dragged block leaves its place first");
+    fn dropping_on_a_block_inserts_before_it_and_pushes_the_columns_forward() {
+        let l = layout(&[(1, 10), (12, 20), (3, 30), (6, 60)]);
+        assert_eq!(insert(&l, 99, None, 2), Some(layout(&[(1, 10), (2, 99), (13, 20), (4, 30), (6, 60)])), "each pushed block keeps its row");
+        assert_eq!(insert(&l, 60, Some(6), 1), Some(layout(&[(1, 60), (2, 10), (13, 20), (4, 30)])), "the dragged block leaves its column first");
     }
 
     #[test]
-    fn without_room_ahead_the_blocks_before_move_back() {
-        let l = layout(&[(3, 30), (4, 40), (5, 50), (6, 60), (7, 70), (8, 80)]);
-        assert_eq!(insert(&l, 99, None, 5), Some(layout(&[(2, 30), (3, 40), (4, 99), (5, 50), (6, 60), (7, 70), (8, 80)])));
+    fn a_block_moved_onto_the_other_row_of_a_taken_column_swaps_columns() {
+        let l = layout(&[(1, 10), (13, 30)]);
+        assert_eq!(insert(&l, 10, Some(1), 3), Some(layout(&[(3, 10), (11, 30)])));
+    }
+
+    #[test]
+    fn a_new_block_on_the_other_row_of_a_taken_column_inserts_and_pushes() {
+        let l = layout(&[(13, 30)]);
+        assert_eq!(insert(&l, 99, None, 3), Some(layout(&[(3, 99), (14, 30)])));
+    }
+
+    #[test]
+    fn without_a_free_column_ahead_the_blocks_before_move_back() {
+        let l = layout(&[(3, 30), (14, 40), (5, 50), (6, 60), (17, 70), (8, 80)]);
+        assert_eq!(insert(&l, 99, None, 5), Some(layout(&[(2, 30), (13, 40), (4, 99), (5, 50), (6, 60), (17, 70), (8, 80)])));
         let full: Layout = (1..=8).map(|p| (p, p as u64)).collect();
-        assert_eq!(insert(&full, 99, None, 4), None);
-        assert_eq!(insert(&full, 3, Some(3), 6), Some(layout(&[(1, 1), (2, 2), (3, 4), (4, 5), (5, 3), (6, 6), (7, 7), (8, 8)])), "a block of the same row");
+        assert_eq!(insert(&full, 99, None, 14), None, "eight blocks: no free column for a new one");
+        assert_eq!(insert(&full, 3, Some(3), 6), Some(layout(&[(1, 1), (2, 2), (3, 4), (4, 5), (5, 3), (6, 6), (7, 7), (8, 8)])));
     }
 
     #[test]
-    fn rows_are_independent() {
-        let l = layout(&[(1, 10), (11, 110)]);
-        assert_eq!(insert(&l, 10, Some(1), 11), Some(layout(&[(11, 10), (12, 110)])));
-    }
-
-    #[test]
-    fn moves_go_through_free_positions() {
+    fn moves_never_put_two_blocks_in_a_column() {
         let current = layout(&[(1, 10), (2, 20), (3, 30)]);
         let target = layout(&[(2, 10), (3, 20), (4, 30)]);
-        let moves = plan_moves(&current, &target);
-        assert_eq!(moves, vec![(3, 4), (2, 3), (1, 2)]);
-        let swap = plan_moves(&layout(&[(1, 10), (2, 20)]), &layout(&[(1, 20), (2, 10)]));
-        assert_eq!(swap.len(), 3, "a swap parks one block: {swap:?}");
+        assert_eq!(plan_moves(&current, &target), vec![(3, 4), (2, 3), (1, 2)]);
+        let swap = plan_moves(&layout(&[(1, 10), (13, 30)]), &layout(&[(3, 10), (11, 30)]));
+        let mut at = layout(&[(1, 10), (13, 30)]);
+        for (from, to) in &swap {
+            let id = at.remove(from).unwrap();
+            assert!(at.keys().all(|p| column_of(*p) != column_of(*to)), "{to} shares a column after {swap:?}");
+            at.insert(*to, id);
+        }
+        assert_eq!(at, layout(&[(3, 10), (11, 30)]));
     }
 
     fn block(position: usize, preset_id: u64, params: Vec<Value>, enabled: bool) -> Block {
