@@ -263,6 +263,14 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [fato] `param` tipado pelo catálogo no monitor (preset 000, sem salvar): `param 4 attack 0.5` e `param 4 tone 1` foram recusados sem enviar nada; `param 4 attack 0.05` virou `0x1e` com float, o aparelho ecoou `A4 Deluxe Comp / Attack = 50.0 ms`, e o `select 0` descartou a edição (preset sem "modificado", Attack gravado ainda 27 ms).
 - [fato] O Deluxe Comp do 000 está gravado com 7 parâmetros, mas o bloco **carregado** (edit buffer `0x16`) tem 10: os 3 do HXtra entram com o padrão do catálogo (`0`: Middle, Normal, Off). Um `0x1e` no índice 9 (Mtr Size = 3) teve resposta ok, eco `ParameterChanged {4, 0, 9, 3}`, preset "modificado" e o valor no edit buffer; o `select 0` o descartou. Ou seja: ao carregar, o aparelho completa com o padrão os parâmetros que o arquivo não tem, e eles são editáveis.
 
+## Capturas NAM e o primeiro upload pelo `hxs` (2026-11-22)
+
+- [fato] `nam.rs` converte `.nam` como o `nam2ir.py` do HXtra: idêntico byte a byte em 30 capturas sintéticas e nas duas capturas reais do usuário ("VOX AC30 + cab" e "[NST] A clean VOX AC30..."), que saíram iguais aos slots 004 e 005 gravados pelo site do HXtra + HX Edit.
+- [fato] O `0x71` que o HX Edit mandou ao importar de novo o IR "1960-G12M25..." (captura `12`, slot 007) é `0xe856311c`, o mesmo do slot 001 com esse IR. [inferência] Ele é derivado do arquivo original e estável por arquivo; não é CRC32, Adler-32, FNV-1a, Murmur3, nem os primeiros bytes de MD5 ou SHA-256 dos dados ou do `.wav` reconstruído.
+- [fato] Bytes do `0x09` do HX Edit: `{0x70: fixint, 0x71: uint32, 0x6d: str (com NUL), 0x72: 1, 0x73: 3, 0x7b: false, 0x7c: false, 0x7d: 0, 0x6e: str16 de 8192}`. Ele responde status 1 e conclui pelo notify (tipo 1).
+- [fato] `hxs upload-capture` no slot 003 (vazio), com os mesmos campos e `0x71` = 4 primeiros bytes do SHA-256 dos dados: depois do envio chegou um cabeçalho inválido (`00 00 ff fe 0d fe ff ff`, ~4 GB anunciados) e o aparelho parou de responder ao SYN em todos os canais. Foi preciso desligar e religar a fonte. Depois disso o slot 003 estava vazio e os 4 IRs estavam idênticos ao backup. Não havia trace dessa tentativa.
+- [hipótese] A causa é o valor do `0x71`, o slot, ou o fato de ser uma captura (o HXtra repassa os dados ao DSP na importação). Teste que separa as hipóteses: importar pelo HX Edit, com captura USB, o mesmo `.wav` no slot 003.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
