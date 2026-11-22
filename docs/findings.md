@@ -344,6 +344,12 @@ Tudo [fato] da captura, salvo quando marcado.
 - [fato] No passo "tipo de divisão" o HX Edit mandou o preset inteiro (`0x15`); trocar o tipo da divisão continua sem comando próprio conhecido.
 - [fato] Um bloco amp + cab guarda os parâmetros do cab na chave 12 (7 valores).
 
+## EXP 2, FS4, FS5 e MIDI CC (2026-11-22, captura `26`, preset 010)
+
+- [fato] Fontes de controller do `0x25`: 2 = **EXP 2**; 6 = **FS4** e 7 = **FS5** (o aparelho responde com os footswitches 3 e 4). Com as anteriores: 0 nenhuma, 1 EXP 1, 3..7 FS1..FS5.
+- [fato] Bypass num **MIDI CC**: `0x25 {0x62: bloco, 0x5f: 5, 0x60: 300, 0x4a: 0, 0x47: número do CC}`; o HX Edit mandou um a cada CC enquanto o usuário subia de 4 a 20, e o aparelho respondeu com a fonte **8** (`0x22 {0x4a: 8, 0x47: CC}`). [HXtra] Os footswitches virtuais FS6..FS10 são os CC 20..24.
+- [fato] O app desenhava as alças da divisão e da junção antes dos blocos, e no egui o widget de cima ganha o arrasto: os blocos vizinhos roubavam o arrasto das alças. Corrigido desenhando as alças depois.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.
