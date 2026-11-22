@@ -56,9 +56,9 @@ Situação: **feito**, **parcial**, **em andamento**, **bloqueado** (falta desco
 
 | Funcionalidade | Situação | O que se sabe |
 |---|---|---|
-| Atribuir bypass e controllers a footswitches e pedais de expressão | a fazer, precisa de captura | seções 3 (footswitches) e 4 (controllers) do preset; o evento `0x22` traz as chaves do comando 37 do tonepush |
-| Snapshots lembram tudo isso | a fazer | os registros dos bancos A (seção `0x0a`) e B (`0x64`) guardam estados de bloco e controllers (`snapshot.rs`) |
-| Bloco ignorado pelos snapshots | a fazer, precisa de captura | o bloco não muda ao trocar de snapshot; funcionalidade do firmware que não pode faltar |
+| Atribuir bypass e controllers a footswitches e pedais de expressão | **parcial** (2026-11-22, falta testar no aparelho) | captura `23`: bypass em FS1–FS5 (`0x38`), parâmetro no EXP 1 (`0x25`, fonte 1) com mínimo/máximo (`0x41`/`0x42`), remover (`0x25`, fonte 0); na interface, "Bypass on FS..." em cada bloco e o menu "ctl" em cada parâmetro. Falta: parâmetro em footswitch (fonte 4: qual footswitch?) e EXP 2; mostrar as atribuições atuais (ler as seções 3 e 4) |
+| Snapshots lembram tudo isso | a fazer | os registros dos bancos A (seção `0x0a`) e B (`0x64`) guardam estados de bloco e controllers (`snapshot.rs`); mudar um parâmetro com um snapshot ativo grava no snapshot (captura `23`) |
+| Bloco ignorado pelos snapshots | **feito** (2026-11-22, falta testar no aparelho) | `0x66 {0x62, 0x3b}` (captura `23`); botões "Ignore snapshots" / "Follow snapshots" em cada bloco. Falta mostrar o estado atual (onde o arquivo guarda) |
 | Snapshots com nome e cor | a fazer, precisa de captura | nome já lido nos dois bancos; cor e escrita desconhecidas |
 
 ### Configurações e padrões

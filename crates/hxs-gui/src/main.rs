@@ -117,7 +117,13 @@ enum Edit {
     Defaults { block: u64, values: Vec<(u64, Value)> },
     Move { from: u64, to: u64 },
     Remove { block: u64 },
+    Bypass { block: u64, footswitch: u64 },
+    FollowSnapshots { block: u64, follows: bool },
+    Controller { block: u64, index: u64, source: stomp::ControllerSource },
+    Range { block: u64, index: u64, max: bool, value: Value },
 }
+
+const FOOTSWITCHES: u64 = 5;
 
 /// Positions of the grid with no block, row A then row B.
 fn free_positions(blocks: &[Block]) -> Vec<usize> {
@@ -648,6 +654,22 @@ impl App {
                 Edit::Remove { block } => self.start_job("removing the block", move |s| {
                     s.remove_block(block)?;
                     Ok(JobResult::EditBuffer(s.edit_buffer()?))
+                }),
+                Edit::Bypass { block, footswitch } => self.start_job("assigning the footswitch", move |s| {
+                    s.assign_bypass(block, footswitch)?;
+                    Ok(JobResult::Text(format!("block {} on/off on FS{}", position_name(block as usize), footswitch + 1)))
+                }),
+                Edit::FollowSnapshots { block, follows } => self.start_job("setting the snapshot bypass", move |s| {
+                    s.set_snapshot_bypass(block, follows)?;
+                    Ok(JobResult::Text(format!("block {} {} the snapshots", position_name(block as usize), if follows { "follows" } else { "ignores" })))
+                }),
+                Edit::Controller { block, index, source } => self.start_job("assigning the controller", move |s| {
+                    s.assign_controller(block, index, source)?;
+                    Ok(JobResult::Text(format!("block {} parameter {index}: {source:?}", position_name(block as usize))))
+                }),
+                Edit::Range { block, index, max, value } => self.start_job("setting the controller range", move |s| {
+                    s.set_controller_range(block, index, max, value)?;
+                    Ok(JobResult::Text(format!("block {} parameter {index}: controller {} set", position_name(block as usize), if max { "max" } else { "min" })))
                 }),
             }
         }
@@ -1239,6 +1261,9 @@ fn block_ui(ui: &mut egui::Ui, b: &mut Block, catalog: Option<&Catalog>, style: 
                     edits.push(Edit::Param { block, index: i as u64, value: v.clone() });
                 }
                 ui.label(p.filter(|p| p.hxtra_added == Some(true)).map_or("", |_| "HXtra"));
+                if p.is_none_or(|p| p.kind != ParamKind::Data) {
+                    controller_menu(ui, block, i, v, edits);
+                }
                 ui.end_row();
             }
         });
@@ -1300,6 +1325,46 @@ fn block_actions(ui: &mut egui::Ui, b: &Block, cm: Option<(&Catalog, &Model)>, s
     if ui.small_button("Remove").clicked() {
         edits.push(Edit::Remove { block });
     }
+    let mut footswitch = None;
+    egui::ComboBox::from_id_salt(("bypass", b.position)).selected_text("Bypass on FS...").show_ui(ui, |ui| {
+        for fs in 0..FOOTSWITCHES {
+            if ui.selectable_label(false, format!("FS{}", fs + 1)).clicked() {
+                footswitch = Some(fs);
+            }
+        }
+    });
+    if let Some(footswitch) = footswitch {
+        edits.push(Edit::Bypass { block, footswitch });
+    }
+    if ui.small_button("Ignore snapshots").on_hover_text("Snapshots stop turning this block on or off").clicked() {
+        edits.push(Edit::FollowSnapshots { block, follows: false });
+    }
+    if ui.small_button("Follow snapshots").clicked() {
+        edits.push(Edit::FollowSnapshots { block, follows: true });
+    }
+}
+
+/// A parameter's controller menu: EXP 1, none, and the current value as the pedal's heel or toe.
+fn controller_menu(ui: &mut egui::Ui, block: u64, index: usize, value: &Value, edits: &mut Vec<Edit>) {
+    let index = index as u64;
+    ui.menu_button("ctl", |ui| {
+        if ui.button("Assign to EXP 1").clicked() {
+            edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::Exp1 });
+            ui.close_menu();
+        }
+        if ui.button("Remove controller").clicked() {
+            edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::None });
+            ui.close_menu();
+        }
+        if ui.button("Use current value as min (heel)").clicked() {
+            edits.push(Edit::Range { block, index, max: false, value: value.clone() });
+            ui.close_menu();
+        }
+        if ui.button("Use current value as max (toe)").clicked() {
+            edits.push(Edit::Range { block, index, max: true, value: value.clone() });
+            ui.close_menu();
+        }
+    });
 }
 
 fn param_ui(ui: &mut egui::Ui, p: Option<&Param>, v: &mut Value, irs: &[IrSlot], id: (usize, usize)) -> bool {

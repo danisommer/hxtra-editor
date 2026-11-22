@@ -300,6 +300,18 @@ Tudo [fato] da captura, salvo quando marcado.
 - [fato] A grade sempre tem o split na célula 10 (tipo 2) e o join na 19 (tipo 3). Com um bloco na segunda linha, os dois têm `18: true` e a posição em `13` (4 e 9 aqui, os `53`/`54` do notify `0x1a`); o split guarda um modelo (`8: 257`), o join outro (`8: 151`).
 - [fato] O HX Edit salva com `0x47` depois de cada ação quando o usuário salva; o `0x05` traz um carimbo novo a cada vez.
 
+## Bypass, controllers e snapshots pelo HX Edit (2026-11-22, captura `23`, slot 011)
+
+| Ação | Comando | Parâmetros | Notify |
+|---|---|---|---|
+| Bypass de um bloco num footswitch | `0x38` | `{0x62: bloco, 0x66: footswitch}` (3 = FS4) | `0x1f` `{0x62, 0x46, 0x4f: true}` |
+| Controller de um parâmetro | `0x25` | `{0x62, 0x1d: true, 0x1a: 0, 0x1c: parâmetro, 0x4a: fonte, 0x47: 4, 0x81: false}`; fonte 1 = EXP 1, 4 = footswitch (qual, [em aberto]), 0 com `0x47: 0` = remover | `0x22` com `0x48`/`0x49` (mínimo/máximo) |
+| Mínimo e máximo do controller | `0x41` / `0x42` | `{0x62, 0x1d, 0x1a, 0x1c, 0x77: valor}` | |
+| Bloco ignora os snapshots | `0x66` | `{0x62, 0x3b: false}` (`true` volta a seguir) | `0x33` `{0x62, 0x3b}` |
+
+- [fato] No arquivo: a seção 3 é a lista FS1..FS5; o bypass ficou na posição 3 (FS4) como `{10: 7, 11: {0: 1, 5: rótulo, 6: 458496, 7: true, 8: bloco}, ...}` ([hipótese] `6` é a cor do LED). A seção 4 é a lista de fontes de controller; a posição 1 (EXP 1) guarda `{1: {1: 4, 2: mínimo, 3: máximo, 5: bloco, 6: {...}}}`.
+- [em aberto] `0x21 {0x66: n}` e `0x24` (o HX Edit os envia junto; parecem consultas da tela) e como a fonte 4 escolhe o footswitch.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

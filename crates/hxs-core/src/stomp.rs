@@ -41,6 +41,28 @@ mod editor_cmd {
     pub const CHANGE_MODEL: u8 = 0x28;
     pub const MOVE_BLOCK: u8 = 0x2b;
     pub const SELECT_BLOCK: u8 = 0x4e;
+    pub const ASSIGN_CONTROLLER: u8 = 0x25;
+    pub const ASSIGN_BYPASS: u8 = 0x38;
+    pub const CONTROLLER_MIN: u8 = 0x41;
+    pub const CONTROLLER_MAX: u8 = 0x42;
+    pub const SNAPSHOT_BYPASS: u8 = 0x66;
+}
+
+/// A controller source as `0x25` names it (capture 23): 0 none, 1 EXP 1. [hypothesis] 4 is a
+/// footswitch, but which one is not known yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerSource {
+    None,
+    Exp1,
+}
+
+impl ControllerSource {
+    fn code(self) -> (u64, u64) {
+        match self {
+            ControllerSource::None => (0, 0),
+            ControllerSource::Exp1 => (1, 4),
+        }
+    }
 }
 
 mod librarian_cmd {
@@ -399,6 +421,37 @@ impl Stomp {
         self.session.request(self.editor, editor_cmd::MOVE_BLOCK, params).map(drop)
     }
 
+    /// Put a block's on/off on footswitch `footswitch` (0..4 = FS1..FS5; preset section 3 keeps
+    /// it in that list position), editor 0x38 (capture 23). Nothing is stored.
+    pub fn assign_bypass(&mut self, block: u64, footswitch: u64) -> Result<()> {
+        let params = int_map(&[(key::BLOCK, Value::from(block)), (FOOTSWITCH, Value::from(footswitch))]);
+        self.session.request(self.editor, editor_cmd::ASSIGN_BYPASS, params).map(drop)
+    }
+
+    /// Give a parameter a controller, or take it away (editor 0x25, capture 23).
+    pub fn assign_controller(&mut self, block: u64, index: u64, source: ControllerSource) -> Result<()> {
+        let (source, kind) = source.code();
+        let mut params = parameter_address(block, index);
+        params.extend([(CONTROLLER_SOURCE, Value::from(source)), (CONTROLLER_KIND, Value::from(kind)), (CONTROLLER_FLAG, Value::from(false))]);
+        self.session.request(self.editor, editor_cmd::ASSIGN_CONTROLLER, int_map(&params)).map(drop)
+    }
+
+    /// The value a controlled parameter takes at the controller's minimum or maximum
+    /// (editor 0x41 / 0x42, capture 23).
+    pub fn set_controller_range(&mut self, block: u64, index: u64, max: bool, value: Value) -> Result<()> {
+        let mut params = parameter_address(block, index);
+        params.push((key::SETTING_VALUE, value));
+        let cmd = if max { editor_cmd::CONTROLLER_MAX } else { editor_cmd::CONTROLLER_MIN };
+        self.session.request(self.editor, cmd, int_map(&params)).map(drop)
+    }
+
+    /// Whether a block's on/off follows the snapshots (`false`: the snapshots leave it alone),
+    /// editor 0x66 `{0x62, 0x3b}` (capture 23; notify 0x33).
+    pub fn set_snapshot_bypass(&mut self, block: u64, follows: bool) -> Result<()> {
+        let params = int_map(&[(key::BLOCK, Value::from(block)), (key::ENABLED, Value::from(follows))]);
+        self.session.request(self.editor, editor_cmd::SNAPSHOT_BYPASS, params).map(drop)
+    }
+
     /// Remove a block (editor 0x1c `{0x62}`, capture 22). Nothing is stored.
     pub fn remove_block(&mut self, position: u64) -> Result<()> {
         self.session.request(self.editor, editor_cmd::REMOVE_BLOCK, int_map(&[(key::BLOCK, Value::from(position))])).map(drop)
@@ -523,6 +576,20 @@ const PUT_CELL: u64 = 0x63;
 const CHANGE_MODEL_REF: u64 = 0x64;
 const MOVE_FROM: u64 = 0x4b;
 const MOVE_TO: u64 = 0x4c;
+const FOOTSWITCH: u64 = 0x66;
+const CONTROLLER_SOURCE: u64 = 0x4a;
+const CONTROLLER_KIND: u64 = 0x47;
+const CONTROLLER_FLAG: u64 = 0x81;
+
+/// `{0x62: block, 0x1d: true, 0x1a: 0, 0x1c: index}`: a parameter of a block's model.
+fn parameter_address(block: u64, index: u64) -> Vec<(u64, Value)> {
+    vec![
+        (key::BLOCK, Value::from(block)),
+        (key::COMMIT, Value::from(true)),
+        (key::PARAMETER_PATH, Value::from(0)),
+        (key::PARAMETER_INDEX, Value::from(index)),
+    ]
+}
 
 /// A block's model reference `{23: has a cab, 25: model, 26: cab or -1}`.
 fn model_ref(preset_id: u64, cab: Option<u64>) -> Value {
@@ -735,6 +802,12 @@ mod tests {
         assert_eq!(decoded.to_string(), "{98: 2, 99: {19: 6, 20: {24: {23: true, 25: 35, 26: 795}, 9: 33, 10: true}}}", "capture 22 at 131.724");
         let change = int_map(&[(key::BLOCK, Value::from(2)), (CHANGE_MODEL_REF, model_ref(35, None))]);
         assert_eq!(change.to_string(), "{98: 2, 100: {23: false, 25: 35, 26: -1}}", "capture 22 at 138.083");
+        let mut exp = parameter_address(14, 2);
+        let (source, kind) = ControllerSource::Exp1.code();
+        exp.extend([(CONTROLLER_SOURCE, Value::from(source)), (CONTROLLER_KIND, Value::from(kind)), (CONTROLLER_FLAG, Value::from(false))]);
+        assert_eq!(int_map(&exp).to_string(), "{98: 14, 29: true, 26: 0, 28: 2, 74: 1, 71: 4, 129: false}", "capture 23 at 66.676");
+        let (none, none_kind) = ControllerSource::None.code();
+        assert_eq!((none, none_kind), (0, 0), "capture 23 at 77.660");
     }
 
     #[test]
