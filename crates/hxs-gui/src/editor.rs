@@ -98,7 +98,7 @@ fn without_data(c: Option<&Catalog>, target: &[Block], ops: Vec<Op>) -> Vec<Op> 
 fn droppable(layout: &Layout, drag: &Drag, position: usize) -> bool {
     match drag {
         Drag::Block(from) => *from == position || chain::insert(layout, *from as u64, Some(*from), position).is_some(),
-        Drag::Model { .. } => chain::insert(layout, NEW_BLOCK, None, position).is_some(),
+        Drag::Model { .. } => layout.contains_key(&position) || chain::insert(layout, NEW_BLOCK, None, position).is_some(),
         Drag::Presets(_) => false,
     }
 }
@@ -720,6 +720,24 @@ impl App {
                 }
                 None => self.note("no free column to move into".to_owned()),
             },
+            Drag::Model { preset_id, cab, kind, .. } if layout.contains_key(&to) => {
+                let Some(old) = d.blocks.iter().find(|b| b.position == to).cloned() else { return };
+                let c = self.catalog_in_use();
+                let params = match (c.and_then(|c| c.model(old.preset_id)), c.and_then(|c| c.model(preset_id))) {
+                    (Some(from), Some(new)) => catalog::carry_values(from, &old.params, new),
+                    (_, Some(new)) => Ok(new.params.iter().map(Param::default_value).collect()),
+                    (_, None) => Err(hxs_core::Error::Catalog(format!("model {preset_id} is not in the catalog"))),
+                };
+                match params {
+                    Ok(params) => {
+                        let target: Vec<Block> = d.blocks.iter().filter(|b| b.position != to).cloned().chain(std::iter::once(Block { preset_id, cab, kind: Some(kind), params, ..old })).collect();
+                        self.ed.selected = Some(to);
+                        self.push_history();
+                        self.reach(target, "replacing the block");
+                    }
+                    Err(e) => self.note(format!("cannot replace: {e}")),
+                }
+            }
             Drag::Model { preset_id, cab, kind, name } => match chain::insert(&layout, NEW_BLOCK, None, to) {
                 Some(new) => {
                     let Some(target) = new.iter().find(|(_, id)| **id == NEW_BLOCK).map(|(p, _)| *p) else { return };
