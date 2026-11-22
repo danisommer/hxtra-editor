@@ -8,6 +8,7 @@
 
 pub mod backup;
 pub mod catalog;
+pub mod chain;
 pub mod device;
 pub mod error;
 pub mod globals;

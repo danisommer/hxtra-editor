@@ -277,6 +277,28 @@ impl Param {
         }
     }
 
+    /// A float typed as the unit shows it ("6.2" on a knob, "74 ms", "85%", "3.7 kHz") in the
+    /// parameter's own units, within its range. A bare number on a time reads in the unit now
+    /// shown (ms below 1 s, else s). `None` when it is not a number.
+    pub fn parse_display(&self, text: &str, current: f64) -> Option<f64> {
+        let t = text.trim().to_lowercase();
+        let digits = t.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))).unwrap_or(t.len());
+        let n: f64 = t[..digits].parse().ok()?;
+        let unit = t[digits..].trim();
+        let timed = matches!(self.display.as_deref(), Some("time" | "time_hi_res" | "timeAB" | "rt60")) || self.unit.as_deref() == Some("sec");
+        let v = match (unit, self.display.as_deref(), timed) {
+            ("ms", _, _) => n / 1000.0,
+            ("s", _, _) => n,
+            ("khz", _, _) => n * 1000.0,
+            ("%", _, _) => n / 100.0,
+            (_, Some("knob"), _) => n / 10.0,
+            (_, Some("percent"), _) => n / 100.0,
+            (_, _, true) if current.abs() < 1.0 => n / 1000.0,
+            _ => n,
+        };
+        Some(v.clamp(self.min.min(self.max), self.max.max(self.min)))
+    }
+
     /// The default as the value type a preset stores for this parameter.
     pub fn default_value(&self) -> Value {
         self.typed(self.default)
@@ -493,6 +515,19 @@ mod tests {
         let c = two_flangers();
         assert_eq!(c.dsp_total(&[304, 305]), (DSP_FIXED + 1400, vec![]));
         assert_eq!(c.dsp_total(&[304, 999]), (DSP_FIXED + 700, vec![999]));
+    }
+
+    #[test]
+    fn typed_values_read_in_the_units_shown() {
+        let c = Catalog::parse(SAMPLE.as_bytes()).unwrap();
+        let m = c.model(124).unwrap();
+        let (threshold, attack) = (m.param(0).unwrap(), m.param(2).unwrap());
+        assert_eq!(attack.parse_display("74 ms", 0.027), Some(0.074));
+        assert_eq!(attack.parse_display("74", 0.027), Some(0.074), "a bare number on a time shown in ms");
+        assert_eq!(attack.parse_display("0.1 s", 0.027), Some(0.1));
+        assert_eq!(attack.parse_display("900 ms", 0.027), Some(0.2), "clamped to the range");
+        assert_eq!(threshold.parse_display("-12 dB", -27.5), Some(-12.0));
+        assert_eq!(threshold.parse_display("abc", -27.5), None);
     }
 
     #[test]

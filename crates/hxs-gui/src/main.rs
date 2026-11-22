@@ -1,6 +1,11 @@
-//! hxtra-editor: a window over an HX Stomp running HXtra or stock firmware.
+﻿//! hxtra-editor: a window over an HX Stomp running HXtra or stock firmware.
 
 #![windows_subsystem = "windows"]
+
+mod editor;
+mod icons;
+mod knob;
+mod theme;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -30,12 +35,19 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 840.0]).with_title("hxtra-editor"),
         ..Default::default()
     };
-    eframe::run_native("hxtra-editor", options, Box::new(|_cc| Ok(Box::new(App::new()))))
+    eframe::run_native(
+        "hxtra-editor",
+        options,
+        Box::new(|cc| {
+            theme::apply(&cc.egui_ctx);
+            Ok(Box::new(App::new()))
+        }),
+    )
 }
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
-    Preset,
+    Edit,
     Library,
     Favorites,
     Catalog,
@@ -110,49 +122,7 @@ fn read_irs(s: &mut stomp::Stomp) -> hxs_core::Result<JobResult> {
     Ok(JobResult::Irs(slots))
 }
 
-enum Edit {
-    Enable { block: u64, on: bool },
-    Param { block: u64, index: u64, value: Value },
-    Favorite { block: u64, name: String },
-    Switch { block: u64, preset_id: u64, cab: Option<u64>, values: Vec<(u64, Value)> },
-    Defaults { block: u64, values: Vec<(u64, Value)> },
-    Move { from: u64, to: u64 },
-    Remove { block: u64 },
-    Bypass { block: u64, footswitch: u64 },
-    FollowSnapshots { block: u64, follows: bool },
-    Controller { block: u64, index: u64, source: stomp::ControllerSource },
-    Range { block: u64, index: u64, max: bool, value: Value },
-}
-
 const FOOTSWITCHES: u64 = 5;
-
-/// Positions of the grid with no block, row A then row B.
-fn free_positions(blocks: &[Block]) -> Vec<usize> {
-    ROW_A.chain(ROW_B).filter(|p| blocks.iter().all(|b| b.position != *p)).collect()
-}
-
-fn position_name(position: usize) -> String {
-    snapshot::slot_label(position).unwrap_or_else(|| format!("#{position}"))
-}
-
-/// Set parameters one by one, then read the edit buffer back for the screen.
-fn set_values_then_read(s: &mut stomp::Stomp, block: u64, values: &[(u64, Value)]) -> hxs_core::Result<JobResult> {
-    for (i, v) in values {
-        s.set_parameter(block, 0, *i, v.clone())?;
-    }
-    Ok(JobResult::EditBuffer(s.edit_buffer()?))
-}
-
-/// The knobs whose wanted value differs from `baseline` (what the block has, or will have,
-/// without them); internal data parameters are never sent.
-fn changed_knobs(model: &Model, wanted: &[Value], baseline: impl Fn(&Param) -> Option<Value>) -> Vec<(u64, Value)> {
-    model
-        .params
-        .iter()
-        .filter(|p| p.kind != ParamKind::Data)
-        .filter_map(|p| wanted.get(p.index).filter(|v| baseline(p).as_ref() != Some(*v)).map(|v| (p.index as u64, v.clone())))
-        .collect()
-}
 
 struct Device {
     current: CurrentPreset,
@@ -183,7 +153,7 @@ struct App {
     nam_name: String,
     confirm_nam: bool,
     ops: Vec<(String, Pending<()>)>,
-    job: Option<(String, Pending<JobResult>)>,
+    jobs: Vec<(String, Pending<JobResult>)>,
     tab: Tab,
     show_hidden: bool,
     log: VecDeque<String>,
@@ -210,13 +180,11 @@ struct App {
     confirm_copy: bool,
     export_slot: usize,
     export_file: String,
-    add_position: usize,
-    add_folder: usize,
-    add_item: usize,
     snapshot_name: String,
     snapshot_color: u64,
     footswitch_labels: [String; FOOTSWITCHES as usize],
     footswitch_colors: [u64; FOOTSWITCHES as usize],
+    ed: editor::EditorState,
 }
 
 impl App {
@@ -238,8 +206,8 @@ impl App {
             nam_name: String::new(),
             confirm_nam: false,
             ops: Vec::new(),
-            job: None,
-            tab: Tab::Preset,
+            jobs: Vec::new(),
+            tab: Tab::Edit,
             show_hidden: false,
             log: VecDeque::new(),
             save_name: String::new(),
@@ -265,13 +233,11 @@ impl App {
             confirm_copy: false,
             export_slot: 0,
             export_file: String::new(),
-            add_position: 0,
-            add_folder: 0,
-            add_item: 0,
             snapshot_name: String::new(),
             snapshot_color: 0,
             footswitch_labels: Default::default(),
             footswitch_colors: [0; FOOTSWITCHES as usize],
+            ed: editor::EditorState::default(),
         };
         app.load_catalog(None);
         app
@@ -320,7 +286,7 @@ impl App {
 
     fn start_job(&mut self, label: &str, f: impl FnOnce(&mut stomp::Stomp) -> hxs_core::Result<JobResult> + Send + 'static) {
         self.note(format!("{label}..."));
-        self.job = Some((label.to_owned(), self.handle.run(f)));
+        self.jobs.push((label.to_owned(), self.handle.run(f)));
     }
 
     fn op(&mut self, label: impl Into<String>, p: Pending<()>) {
@@ -391,8 +357,15 @@ impl App {
         for f in failed {
             self.note(f);
         }
-        if let Some(r) = self.job.as_ref().and_then(|(_, p)| p.poll()) {
-            let (label, _) = self.job.take().expect("a polled job");
+        let mut done = Vec::new();
+        self.jobs.retain(|(label, p)| match p.poll() {
+            None => true,
+            Some(r) => {
+                done.push((label.clone(), r));
+                false
+            }
+        });
+        for (label, r) in done {
             match r {
                 Ok(JobResult::Text(t)) => self.note(format!("{label}: {t}")),
                 Ok(JobResult::Plan(dir, plan)) => {
@@ -519,395 +492,15 @@ impl App {
                 ));
             }
             ui.separator();
-            if let Some((label, _)) = &self.job {
+            if let Some((label, _)) = self.jobs.first() {
                 ui.spinner();
                 ui.label(label);
             }
         });
-        ui.horizontal(|ui| {
-            for (tab, name) in [
-                (Tab::Preset, "Preset"),
-                (Tab::Library, "Library"),
-                (Tab::Favorites, "Favorites"),
-                (Tab::Catalog, "Catalog"),
-                (Tab::Settings, "Settings"),
-                (Tab::Log, "Log"),
-            ] {
-                ui.selectable_value(&mut self.tab, tab, name);
-            }
-            ui.separator();
-            ui.label(format!("catalog: {}", self.catalog_note));
-        });
-    }
-
-    fn preset_list(&mut self, ui: &mut egui::Ui) {
-        let Some(d) = &self.device else {
-            ui.label("not connected");
-            return;
-        };
-        let (setlist, current) = (d.current.setlist, d.current.slot as usize);
-        let (mut chosen, mut copy, mut export, mut swap) = (None, None, None, None);
-        let last = d.presets.len().saturating_sub(1);
-        egui::ScrollArea::vertical().id_salt("presets").show(ui, |ui| {
-            for p in &d.presets {
-                let r = ui.selectable_label(p.slot == current, format!("{:03}  {}", p.slot, p.name)).on_hover_text("Right-click: copy or export");
-                if r.clicked() {
-                    chosen = Some(p.slot);
-                }
-                r.context_menu(|ui| {
-                    if ui.button("Copy to another slot...").clicked() {
-                        copy = Some((p.slot, p.name.clone()));
-                        ui.close_menu();
-                    }
-                    if ui.button("Export to a file...").clicked() {
-                        export = Some((p.slot, p.name.clone()));
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.add_enabled(p.slot > 0, egui::Button::new("Move up")).clicked() {
-                        swap = Some((p.slot, p.slot - 1));
-                        ui.close_menu();
-                    }
-                    if ui.add_enabled(p.slot < last, egui::Button::new("Move down")).clicked() {
-                        swap = Some((p.slot, p.slot + 1));
-                        ui.close_menu();
-                    }
-                });
-            }
-        });
-        let reordered = swap.map(|(a, b)| {
-            let mut order = d.presets.clone();
-            order.swap(a, b);
-            order
-        });
-        if let Some(slot) = chosen {
-            let p = self.handle.select_preset(setlist, slot);
-            self.op(format!("load preset {slot:03}"), p);
-        }
-        if let Some(order) = reordered {
-            self.start_job("moving the preset", move |s| {
-                s.reorder_presets(setlist, &order)?;
-                Ok(JobResult::Presets(s.preset_list(setlist)?))
-            });
-        }
-        if let Some((slot, name)) = copy {
-            (self.copy_from, self.copy_name, self.confirm_copy, self.tab) = (slot, name, false, Tab::Library);
-        }
-        if let Some((slot, name)) = export {
-            self.export_slot = slot;
-            self.export_file = default_export_path(slot, &name);
-            self.tab = Tab::Library;
-        }
-    }
-
-    fn preset_tab(&mut self, ui: &mut egui::Ui) {
-        let Some(d) = &self.device else {
-            ui.heading("Not connected");
-            ui.label("Close HX Edit, connect the HX Stomp over USB and press Connect.");
-            return;
-        };
-        let (setlist, slot) = (d.current.setlist, d.current.slot as usize);
-        let snapshot_names = d.snapshot_names.clone();
-        let current_snapshot = d.snapshot;
-        ui.horizontal(|ui| {
-            ui.label("Snapshot:");
-            for n in 1..=6u8 {
-                let name = snapshot_names.get(usize::from(n) - 1).cloned().unwrap_or_default();
-                let text = match name.is_empty() {
-                    true => n.to_string(),
-                    false => format!("{n} {name}"),
-                };
-                if ui.selectable_label(current_snapshot == Some(u64::from(n)), text).clicked() {
-                    let p = self.handle.recall_snapshot(n);
-                    self.op(format!("snapshot {n} (MIDI CC 69)"), p);
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Name:");
-            ui.add(egui::TextEdit::singleline(&mut self.save_name).desired_width(160.0).char_limit(stomp::MAX_PRESET_NAME));
-            if ui.button("Save to this slot").on_hover_text("Stores the edited preset in its slot (writes to the unit)").clicked() {
-                match stomp::validate_name(&self.save_name) {
-                    Ok(()) => {
-                        let p = self.handle.save_preset(setlist, slot, &self.save_name);
-                        self.op(format!("save preset {slot:03}"), p);
-                        if let Some(d) = self.device.as_mut() {
-                            d.edited = false;
-                        }
-                    }
-                    Err(e) => self.note(format!("not saved: {e}")),
-                }
-            }
-            if ui.button("Refresh").on_hover_text("Reads the edit buffer again (briefly interrupts the sound in snapshots 4-6)").clicked() {
-                self.start_job("reading the edit buffer", |s| Ok(JobResult::EditBuffer(s.edit_buffer()?)));
-            }
-            ui.checkbox(&mut self.show_hidden, "hidden parameters");
-        });
-        self.snapshot_row(ui);
-        self.footswitch_section(ui);
-        self.tempo_row(ui);
-        self.dsp_row(ui);
-        self.add_block_row(ui);
-        self.favorite_prompt(ui);
-        ui.separator();
-        let mut edits = Vec::new();
-        let catalog = match self.catalog_ignored {
-            true => None,
-            false => self.catalog.as_ref(),
-        };
-        let (style, hidden, irs) = (self.style, self.show_hidden, &self.irs);
-        let Some(d) = self.device.as_mut() else { return };
-        let free = free_positions(&d.blocks);
-        egui::ScrollArea::vertical().id_salt("blocks").show(ui, |ui| {
-            if d.blocks.is_empty() {
-                ui.label("no blocks in this preset");
-            }
-            for b in d.blocks.iter_mut() {
-                block_ui(ui, b, catalog, style, hidden, irs, &free, &mut edits);
-            }
-        });
-        if !edits.is_empty() {
-            d.edited = true;
-        }
-        for e in edits {
-            match e {
-                Edit::Enable { block, on } => {
-                    let p = self.handle.set_block_enabled(block, on);
-                    self.op(format!("block {block} {}", if on { "on" } else { "off" }), p);
-                }
-                Edit::Param { block, index, value } => {
-                    let p = self.handle.set_parameter(block, 0, index, value);
-                    self.op(format!("block {block} parameter {index}"), p);
-                }
-                Edit::Favorite { block, name } => self.new_favorite = Some((block, name)),
-                Edit::Switch { block, preset_id, cab, values } => self.start_job("switching the model", move |s| {
-                    s.change_model(block, preset_id, cab)?;
-                    set_values_then_read(s, block, &values)
-                }),
-                Edit::Defaults { block, values } => self.start_job("restoring the block's defaults", move |s| set_values_then_read(s, block, &values)),
-                Edit::Move { from, to } => self.start_job("moving the block", move |s| {
-                    s.move_block(from, to)?;
-                    Ok(JobResult::EditBuffer(s.edit_buffer()?))
-                }),
-                Edit::Remove { block } => self.start_job("removing the block", move |s| {
-                    s.remove_block(block)?;
-                    Ok(JobResult::EditBuffer(s.edit_buffer()?))
-                }),
-                Edit::Bypass { block, footswitch } => self.start_job("assigning the footswitch", move |s| {
-                    s.assign_bypass(block, footswitch)?;
-                    Ok(JobResult::Text(format!("block {} on/off on FS{}", position_name(block as usize), footswitch + 1)))
-                }),
-                Edit::FollowSnapshots { block, follows } => self.start_job("setting the snapshot bypass", move |s| {
-                    s.set_snapshot_bypass(block, follows)?;
-                    Ok(JobResult::Text(format!("block {} {} the snapshots", position_name(block as usize), if follows { "follows" } else { "ignores" })))
-                }),
-                Edit::Controller { block, index, source } => self.start_job("assigning the controller", move |s| {
-                    s.assign_controller(block, index, source)?;
-                    Ok(JobResult::Text(format!("block {} parameter {index}: {source:?}", position_name(block as usize))))
-                }),
-                Edit::Range { block, index, max, value } => self.start_job("setting the controller range", move |s| {
-                    s.set_controller_range(block, index, max, value)?;
-                    Ok(JobResult::Text(format!("block {} parameter {index}: controller {} set", position_name(block as usize), if max { "max" } else { "min" })))
-                }),
-            }
-        }
-    }
-
-    fn add_block_row(&mut self, ui: &mut egui::Ui) {
-        let (Some(d), Some(c)) = (&self.device, self.catalog.as_ref().filter(|_| !self.catalog_ignored)) else { return };
-        let free = free_positions(&d.blocks);
-        if free.is_empty() || c.browser.is_empty() {
-            return;
-        }
-        let style = self.style;
-        self.add_position = self.add_position.min(free.len() - 1);
-        self.add_folder = self.add_folder.min(c.browser.len() - 1);
-        let folder = &c.browser[self.add_folder];
-        self.add_item = self.add_item.min(folder.items.len().saturating_sub(1));
-        let mut add = None;
-        ui.horizontal(|ui| {
-            ui.label("Add block at");
-            egui::ComboBox::from_id_salt("add_pos").selected_text(position_name(free[self.add_position])).show_ui(ui, |ui| {
-                for (i, p) in free.iter().enumerate() {
-                    ui.selectable_value(&mut self.add_position, i, position_name(*p));
-                }
-            });
-            let folder_name = |f: &catalog::Folder| format!("{} / {}", f.category.as_deref().unwrap_or("?"), f.folder);
-            egui::ComboBox::from_id_salt("add_folder").width(200.0).selected_text(folder_name(folder)).show_ui(ui, |ui| {
-                for (i, f) in c.browser.iter().enumerate() {
-                    ui.selectable_value(&mut self.add_folder, i, folder_name(f));
-                }
-            });
-            let item_name = |it: &catalog::FolderItem| it.model.and_then(|m| c.model(m)).map_or(it.title.clone(), |m| m.display_name(style).to_owned());
-            let current = folder.items.get(self.add_item).map(item_name).unwrap_or_default();
-            egui::ComboBox::from_id_salt("add_item").width(220.0).selected_text(current).show_ui(ui, |ui| {
-                for (i, it) in folder.items.iter().enumerate() {
-                    ui.selectable_value(&mut self.add_item, i, item_name(it));
-                }
-            });
-            if ui.button("Add").on_hover_text("Puts the model with its defaults in the edit buffer; Save stores it").clicked() {
-                add = folder.items.get(self.add_item).and_then(|it| it.model.map(|m| (free[self.add_position] as u64, m, it.cab, it.kind)));
-            }
-        });
-        if let Some((position, model, cab, kind)) = add {
-            self.start_job("adding the block", move |s| {
-                s.add_block(position, model, cab, kind)?;
-                Ok(JobResult::EditBuffer(s.edit_buffer()?))
-            });
-        }
-    }
-
-    fn snapshot_row(&mut self, ui: &mut egui::Ui) {
-        let Some(n) = self.device.as_ref().and_then(|d| d.snapshot) else { return };
-        let index = (n - 1) % 3;
-        let mut job = None;
-        ui.horizontal(|ui| {
-            ui.label(format!("Snapshot {n}:"));
-            ui.add(egui::TextEdit::singleline(&mut self.snapshot_name).desired_width(100.0).char_limit(stomp::MAX_SNAPSHOT_NAME));
-            if ui.button("Rename").clicked() {
-                job = Some((true, self.snapshot_name.clone(), 0));
-            }
-            ui.add(egui::DragValue::new(&mut self.snapshot_color).range(0..=15).prefix("color "));
-            if ui.button("Set color").on_hover_text("The color number as the unit stores it; the palette is not mapped yet").clicked() {
-                job = Some((false, String::new(), self.snapshot_color));
-            }
-        });
-        match job {
-            Some((true, name, _)) => self.start_job("renaming the snapshot", move |s| {
-                s.rename_snapshot(index, &name)?;
-                Ok(JobResult::EditBuffer(s.edit_buffer()?))
-            }),
-            Some((false, _, color)) => self.start_job("coloring the snapshot", move |s| {
-                s.set_snapshot_color(index, color)?;
-                Ok(JobResult::Text(format!("snapshot {n}: color {color}")))
-            }),
-            None => {}
-        }
-    }
-
-    fn footswitch_section(&mut self, ui: &mut egui::Ui) {
-        let mut job = None;
-        egui::CollapsingHeader::new("Footswitch labels and colors").show(ui, |ui| {
-            egui::Grid::new("footswitches").show(ui, |ui| {
-                for fs in 0..FOOTSWITCHES as usize {
-                    ui.label(format!("FS{}", fs + 1));
-                    ui.add(egui::TextEdit::singleline(&mut self.footswitch_labels[fs]).desired_width(140.0).char_limit(stomp::MAX_PRESET_NAME));
-                    if ui.button("Set label").clicked() {
-                        job = Some((fs as u64, Some(self.footswitch_labels[fs].clone()), None));
-                    }
-                    ui.add(egui::DragValue::new(&mut self.footswitch_colors[fs]).range(0..=15).prefix("color "));
-                    if ui.button("Set color").clicked() {
-                        job = Some((fs as u64, None, Some(self.footswitch_colors[fs])));
-                    }
-                    ui.end_row();
-                }
-            });
-        });
-        match job {
-            Some((fs, Some(label), _)) => self.start_job("labeling the footswitch", move |s| {
-                s.set_footswitch_label(fs, &label)?;
-                Ok(JobResult::Text(format!("FS{} labeled \"{label}\"", fs + 1)))
-            }),
-            Some((fs, None, Some(color))) => self.start_job("coloring the footswitch", move |s| {
-                s.set_footswitch_color(fs, color)?;
-                Ok(JobResult::Text(format!("FS{}: color {color}", fs + 1)))
-            }),
-            _ => {}
-        }
-    }
-
-    fn tempo_row(&mut self, ui: &mut egui::Ui) {
-        let Some(d) = self.device.as_mut() else { return };
-        let mut writes = Vec::new();
-        ui.horizontal(|ui| {
-            ui.label("Preset tempo:");
-            match d.preset_tempo.as_mut() {
-                Some(t) => {
-                    if ui.add(egui::DragValue::new(t).range(TEMPO_RANGE).speed(0.1).suffix(" BPM")).changed() {
-                        writes.push((SETTING_PRESET_TEMPO, *t));
-                    }
-                }
-                None => {
-                    ui.label("?");
-                }
-            }
-            if ui.button("Tap").on_hover_text("Tap at least twice: sets the current preset's tempo (as the unit's tap does)").clicked() {
-                let now = Instant::now();
-                if self.taps.last().is_some_and(|t| now - *t > TAP_GAP) {
-                    self.taps.clear();
-                }
-                self.taps.push(now);
-                if self.taps.len() > TAPS_KEPT {
-                    self.taps.remove(0);
-                }
-                if let Some(bpm) = tap_bpm(&self.taps) {
-                    d.preset_tempo = Some(bpm);
-                    writes.push((SETTING_PRESET_TEMPO, bpm));
-                }
-            }
-            ui.separator();
-            ui.label("Global tempo:");
-            match d.global_bpm.as_mut() {
-                Some(t) => {
-                    if ui.add(egui::DragValue::new(t).range(TEMPO_RANGE).speed(0.1).suffix(" BPM")).changed() {
-                        writes.push((SETTING_GLOBAL_BPM, *t));
-                    }
-                }
-                None => {
-                    ui.label("?");
-                }
-            }
-        });
-        if writes.iter().any(|(id, _)| *id == SETTING_PRESET_TEMPO) {
-            d.edited = true;
-        }
-        for (id, bpm) in writes {
-            let p = self.handle.set_setting(id, Value::F32(bpm));
-            self.op(format!("tempo {bpm:.1} BPM (setting {id})"), p);
-        }
-    }
-
-    fn dsp_row(&self, ui: &mut egui::Ui) {
-        let (Some(d), Some(c)) = (&self.device, self.catalog.as_ref().filter(|_| !self.catalog_ignored)) else { return };
-        let ids: Vec<u64> = d.blocks.iter().flat_map(|b| std::iter::once(b.preset_id).chain(b.cab)).collect();
-        let (total, unknown) = c.dsp_total(&ids);
-        ui.horizontal(|ui| {
-            ui.label("DSP:");
-            let bar = egui::ProgressBar::new(total as f32 / 10000.0).desired_width(240.0).text(format!("{:.1}% of {:.0}%", total as f32 / 100.0, catalog::DSP_LIMIT as f32 / 100.0));
-            ui.add(bar).on_hover_text("The firmware's declared costs: 15% fixed plus each block's (HXtra's research); the unit refuses a preset above 90%");
-            if !unknown.is_empty() {
-                ui.label(format!("(not counted: models {unknown:?})"));
-            }
-        });
-    }
-
-    fn favorite_prompt(&mut self, ui: &mut egui::Ui) {
-        let Some((block, name)) = self.new_favorite.as_mut() else { return };
-        let block = *block;
-        let (mut save, mut cancel) = (false, false);
-        ui.horizontal(|ui| {
-            ui.label(format!("Save block {} as a new favorite, named:", snapshot::slot_label(block as usize).unwrap_or_default()));
-            ui.add(egui::TextEdit::singleline(name).desired_width(160.0).char_limit(stomp::MAX_PRESET_NAME));
-            save = ui.button("Save favorite").on_hover_text("Writes a new favorite to the unit").clicked();
-            cancel = ui.button("Cancel").clicked();
-        });
-        match (save, cancel) {
-            (true, _) => {
-                let name = name.clone();
-                let index = self.favorites.len() as u64;
-                self.new_favorite = None;
-                self.start_job("saving the favorite", move |s| {
-                    s.save_block_as_favorite(block, index, &name)?;
-                    read_favorites(s)
-                });
-            }
-            (false, true) => self.new_favorite = None,
-            (false, false) => {}
-        }
     }
 
     fn favorites_tab(&mut self, ui: &mut egui::Ui) {
-        let connected = self.device.is_some() && self.job.is_none();
+        let connected = self.device.is_some() && self.jobs.is_empty();
         ui.horizontal(|ui| {
             ui.heading("Favorites");
             if ui.add_enabled(connected, egui::Button::new("Refresh")).clicked() {
@@ -947,7 +540,7 @@ impl App {
     }
 
     fn library_tab(&mut self, ui: &mut egui::Ui) {
-        let connected = self.device.is_some() && self.job.is_none();
+        let connected = self.device.is_some() && self.jobs.is_empty();
         let setlist = self.device.as_ref().map_or(0, |d| d.current.setlist);
         egui::ScrollArea::vertical().id_salt("library").show(ui, |ui| {
             ui.heading("Backup");
@@ -1284,20 +877,27 @@ impl eframe::App for App {
         self.poll();
         egui::TopBottomPanel::top("top").show(ctx, |ui| self.top_bar(ui));
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.label(self.log.back().map_or("", String::as_str));
+            ui.horizontal(|ui| {
+                ui.label(self.log.back().map_or("", String::as_str));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.weak(format!("catalog: {}", self.catalog_note)));
+            });
         });
-        egui::SidePanel::left("presets").default_width(220.0).show(ctx, |ui| {
-            ui.heading("Presets");
-            self.preset_list(ui);
-        });
+        egui::SidePanel::left("screens").exact_width(48.0).resizable(false).show(ctx, |ui| self.screen_bar(ui));
+        egui::SidePanel::left("presets").default_width(210.0).min_width(180.0).show(ctx, |ui| self.preset_panel(ui));
+        if self.tab == Tab::Edit {
+            egui::SidePanel::left("browser").default_width(220.0).show(ctx, |ui| self.browser_panel(ui));
+        }
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-            Tab::Preset => self.preset_tab(ui),
+            Tab::Edit => self.editor_screen(ui),
             Tab::Library => self.library_tab(ui),
             Tab::Favorites => self.favorites_tab(ui),
             Tab::Catalog => self.catalog_tab(ui),
             Tab::Settings => self.settings_tab(ui),
             Tab::Log => self.log_tab(ui),
         });
+        self.editor_windows(ctx);
+        self.shortcuts(ctx);
+        editor::paint_drag_ghost(ctx);
         ctx.request_repaint_after(Duration::from_millis(50));
     }
 
@@ -1311,259 +911,6 @@ fn preset_view(p: &PresetFile) -> (Vec<Block>, Vec<String>) {
     let blocks = p.blocks().unwrap_or_default();
     let names = snapshot::snapshots(p).map(|s| s.into_iter().map(|s| s.name).collect()).unwrap_or_default();
     (blocks, names)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn block_ui(ui: &mut egui::Ui, b: &mut Block, catalog: Option<&Catalog>, style: NameStyle, hidden: bool, irs: &[IrSlot], free: &[usize], edits: &mut Vec<Edit>) {
-    let model = catalog.and_then(|c| c.model(b.preset_id));
-    let position = position_name(b.position);
-    let cab = b.cab.map(|id| catalog.and_then(|c| c.model(id)).map_or(format!("cab {id}"), |m| m.display_name(style).to_owned()));
-    let title = match (model, &cab) {
-        (Some(m), _) if m.is_capture() => format!("{position}  Capture: {}", m.display_name(style)),
-        (Some(m), Some(cab)) => format!("{position}  {} + {cab}", m.display_name(style)),
-        (Some(m), None) => format!("{position}  {}", m.display_name(style)),
-        (None, _) => format!("{position}  model {}", b.preset_id),
-    };
-    let block = b.position as u64;
-    let (c, m) = match (catalog, model) {
-        (Some(c), Some(m)) => (Some(c), Some(m)),
-        _ => (None, None),
-    };
-    ui.group(|ui| {
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut b.enabled, "").changed() {
-                edits.push(Edit::Enable { block, on: b.enabled });
-            }
-            ui.strong(title);
-            if let Some(m) = model {
-                ui.label(model_notes(m, style));
-                if let Some(cost) = m.dsp_cost {
-                    ui.label(format!("DSP {:.1}%", cost as f32 / 100.0));
-                }
-            }
-            if ui.small_button("Save as favorite").clicked() {
-                let name: String = model.map_or("Favorite".to_owned(), |m| m.display_name(style).chars().filter(|c| (' '..='~').contains(c)).take(stomp::MAX_PRESET_NAME).collect());
-                edits.push(Edit::Favorite { block, name });
-            }
-        });
-        ui.horizontal(|ui| block_actions(ui, b, c.zip(m), style, free, edits));
-        egui::Grid::new(("params", b.position)).num_columns(3).show(ui, |ui| {
-            for (i, v) in b.params.iter_mut().enumerate() {
-                let p = model.and_then(|m| m.param(i));
-                if p.is_some_and(|p| !(p.visible || hidden)) {
-                    continue;
-                }
-                ui.label(p.map_or(format!("[{i}]"), |p| p.title.clone()));
-                if param_ui(ui, p, v, irs, (b.position, i)) {
-                    edits.push(Edit::Param { block, index: i as u64, value: v.clone() });
-                }
-                ui.label(p.filter(|p| p.hxtra_added == Some(true)).map_or("", |_| "HXtra"));
-                if p.is_none_or(|p| p.kind != ParamKind::Data) {
-                    controller_menu(ui, block, i, v, edits);
-                }
-                ui.end_row();
-            }
-        });
-    });
-}
-
-/// Switch to a variant (keeping shared values), add or drop an amp's cab, restore defaults,
-/// move or remove: the block's row of actions.
-fn block_actions(ui: &mut egui::Ui, b: &Block, cm: Option<(&Catalog, &Model)>, style: NameStyle, free: &[usize], edits: &mut Vec<Edit>) {
-    let block = b.position as u64;
-    if let Some((c, m)) = cm {
-        let mut targets: Vec<(String, u64, Option<u64>)> = c
-            .variants(m)
-            .into_iter()
-            .map(|v| (format!("{} ({})", v.display_name(style), v.subcategory.as_deref().unwrap_or(v.shown_category())), v.preset_id, b.cab))
-            .collect();
-        match (b.cab, c.default_cab(m.preset_id)) {
-            (Some(_), _) => targets.push(("without its cab".into(), m.preset_id, None)),
-            (None, Some(cab)) => targets.push((format!("with its cab ({})", c.model(cab).map_or(cab.to_string(), |x| x.display_name(style).to_owned())), m.preset_id, Some(cab))),
-            (None, None) => {}
-        }
-        let mut chosen = None;
-        egui::ComboBox::from_id_salt(("switch", b.position)).selected_text("Switch to...").show_ui(ui, |ui| {
-            for (label, id, cab) in &targets {
-                if ui.selectable_label(false, label).on_hover_text("Keeps the values both models have").clicked() {
-                    chosen = Some((*id, *cab));
-                }
-            }
-        });
-        if let Some((id, cab)) = chosen {
-            match c.model(id).map(|to| (to, catalog::carry_values(m, &b.params, to))) {
-                Some((to, Ok(values))) => {
-                    let values = changed_knobs(to, &values, |p| Some(p.default_value()));
-                    edits.push(Edit::Switch { block, preset_id: id, cab, values });
-                }
-                Some((_, Err(e))) => {
-                    ui.label(format!("cannot switch: {e}"));
-                }
-                None => {}
-            }
-        }
-        if ui.small_button("Factory defaults").on_hover_text("Sets every parameter of this block back to the model's default").clicked() {
-            let values = changed_knobs(m, &catalog::default_values(m, &b.params), |p| b.params.get(p.index).cloned());
-            edits.push(Edit::Defaults { block, values });
-        }
-    }
-    let mut to = None;
-    egui::ComboBox::from_id_salt(("move", b.position)).selected_text("Move to...").show_ui(ui, |ui| {
-        for p in free {
-            let row = if ROW_B.contains(p) { " (parallel path)" } else { "" };
-            if ui.selectable_label(false, format!("{}{row}", position_name(*p))).clicked() {
-                to = Some(*p as u64);
-            }
-        }
-    });
-    if let Some(to) = to {
-        edits.push(Edit::Move { from: block, to });
-    }
-    if ui.small_button("Remove").clicked() {
-        edits.push(Edit::Remove { block });
-    }
-    let mut footswitch = None;
-    egui::ComboBox::from_id_salt(("bypass", b.position)).selected_text("Bypass on FS...").show_ui(ui, |ui| {
-        for fs in 0..FOOTSWITCHES {
-            if ui.selectable_label(false, format!("FS{}", fs + 1)).clicked() {
-                footswitch = Some(fs);
-            }
-        }
-    });
-    if let Some(footswitch) = footswitch {
-        edits.push(Edit::Bypass { block, footswitch });
-    }
-    if ui.small_button("Ignore snapshots").on_hover_text("Snapshots stop turning this block on or off").clicked() {
-        edits.push(Edit::FollowSnapshots { block, follows: false });
-    }
-    if ui.small_button("Follow snapshots").clicked() {
-        edits.push(Edit::FollowSnapshots { block, follows: true });
-    }
-}
-
-/// A parameter's controller menu: EXP 1, none, and the current value as the pedal's heel or toe.
-fn controller_menu(ui: &mut egui::Ui, block: u64, index: usize, value: &Value, edits: &mut Vec<Edit>) {
-    let index = index as u64;
-    ui.menu_button("ctl", |ui| {
-        if ui.button("Assign to EXP 1").clicked() {
-            edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::Exp1 });
-            ui.close_menu();
-        }
-        if ui.button("Assign to FS4").clicked() {
-            edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::Fs4 });
-            ui.close_menu();
-        }
-        if ui.button("Assign to FS5").clicked() {
-            edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::Fs5 });
-            ui.close_menu();
-        }
-        if ui.button("Remove controller").clicked() {
-            edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::None });
-            ui.close_menu();
-        }
-        if ui.button("Use current value as min (heel)").clicked() {
-            edits.push(Edit::Range { block, index, max: false, value: value.clone() });
-            ui.close_menu();
-        }
-        if ui.button("Use current value as max (toe)").clicked() {
-            edits.push(Edit::Range { block, index, max: true, value: value.clone() });
-            ui.close_menu();
-        }
-    });
-}
-
-fn param_ui(ui: &mut egui::Ui, p: Option<&Param>, v: &mut Value, irs: &[IrSlot], id: (usize, usize)) -> bool {
-    let number = v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)).unwrap_or(0.0);
-    match p {
-        Some(p) if p.role.as_deref() == Some(ROLE_CAPTURE_SLOT) => capture_ui(ui, v, number, irs, id),
-        Some(p) => match p.kind {
-            ParamKind::Float => {
-                let mut x = number;
-                let log = p.min > 0.0 && p.max / p.min >= 100.0;
-                let fmt = |n: f64, _| p.format(&Value::F64(n));
-                let changed = ui.add(egui::Slider::new(&mut x, p.min..=p.max).logarithmic(log).custom_formatter(fmt)).changed();
-                if changed {
-                    *v = Value::F32(x as f32);
-                }
-                changed
-            }
-            ParamKind::List | ParamKind::Int => match &p.choices {
-                Some(choices) => {
-                    let mut selected = number as i64;
-                    let current = choices.iter().find(|c| c.value == selected).map_or(selected.to_string(), |c| c.label.clone());
-                    egui::ComboBox::from_id_salt(("list", id)).selected_text(current).show_ui(ui, |ui| {
-                        for c in choices {
-                            ui.selectable_value(&mut selected, c.value, &c.label);
-                        }
-                    });
-                    let changed = selected != number as i64;
-                    if changed {
-                        *v = Value::from(selected);
-                    }
-                    changed
-                }
-                None => {
-                    let mut n = number as i64;
-                    let changed = ui.add(egui::DragValue::new(&mut n).range(p.min as i64..=p.max as i64)).changed();
-                    if changed {
-                        *v = Value::from(n);
-                    }
-                    changed
-                }
-            },
-            ParamKind::Bool => {
-                let mut on = v.as_bool().unwrap_or(number != 0.0);
-                let changed = ui.checkbox(&mut on, "").changed();
-                if changed {
-                    *v = Value::from(on);
-                }
-                changed
-            }
-            ParamKind::Data => {
-                ui.label(restore::value_text(v));
-                false
-            }
-        },
-        None => raw_ui(ui, v),
-    }
-}
-
-fn capture_ui(ui: &mut egui::Ui, v: &mut Value, number: f64, irs: &[IrSlot], id: (usize, usize)) -> bool {
-    let mut slot = number.round().clamp(0.0, IR_SLOTS as f64) as u64;
-    let name = |s: u64| match irs.iter().find(|i| i.index + 1 == s) {
-        Some(i) if i.capture => i.name.clone(),
-        Some(i) => format!("{} (an IR, not a capture)", i.name),
-        None => "(empty slot)".to_owned(),
-    };
-    egui::ComboBox::from_id_salt(("capture", id)).width(300.0).selected_text(format!("{slot:03} {}", name(slot))).show_ui(ui, |ui| {
-        for ir in irs.iter().filter(|i| i.capture) {
-            ui.selectable_value(&mut slot, ir.index + 1, format!("{:03} {}", ir.index + 1, ir.name));
-        }
-    });
-    let changed = slot != number.round() as u64;
-    if changed {
-        *v = Value::F32(slot as f32);
-    }
-    changed
-}
-
-fn raw_ui(ui: &mut egui::Ui, v: &mut Value) -> bool {
-    match v {
-        Value::F32(x) => ui.add(egui::DragValue::new(x).speed(0.01)).changed(),
-        Value::Boolean(b) => ui.checkbox(b, "").changed(),
-        Value::Integer(_) => {
-            let mut n = v.as_i64().unwrap_or(0);
-            let changed = ui.add(egui::DragValue::new(&mut n)).changed();
-            if changed {
-                *v = Value::from(n);
-            }
-            changed
-        }
-        other => {
-            ui.label(restore::value_text(other));
-            false
-        }
-    }
 }
 
 fn model_notes(m: &Model, style: NameStyle) -> String {
