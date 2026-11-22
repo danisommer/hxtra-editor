@@ -14,6 +14,8 @@ pub enum Error {
     Midi(String),
     #[error("catalog: {0}")]
     Catalog(String),
+    #[error("NAM capture: {0}")]
+    Nam(String),
     #[error("USB: {0}")]
     Usb(nusb::Error),
     #[error("USB transfer: {0}")]

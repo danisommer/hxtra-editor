@@ -20,9 +20,9 @@ Registro do que foi decidido com o usuário e ainda falta fazer, para não se pe
 
 | Funcionalidade | Situação | O que se sabe |
 |---|---|---|
-| Subir `.nam` | não feito | conversão: portar o `nam2ir` do HXtra; upload: librarian `0x09` já implementado, mas falta saber calcular o campo `0x71` (u32) de um IR novo: **não** é CRC32 nem Adler-32 dos 8192 bytes (testado nos 4 IRs do backup) |
+| Subir `.nam` | pronto, **falta o teste no aparelho** | conversão portada (`nam.rs`), idêntica byte a byte ao `nam2ir.py` do HXtra em 30 capturas sintéticas; upload por `hxs upload-capture` e pela aba Library. Em aberto: o campo `0x71` (u32) de um IR novo **não** é CRC32, Adler-32, FNV-1a, Murmur3, nem os primeiros bytes de MD5 ou SHA-256 dos dados, do `.wav` ou do nome (testado nos 4 IRs do backup); o app manda os 4 primeiros bytes do SHA-256 dos dados, e a releitura depois do primeiro upload mostra se o aparelho aceita, guarda ou troca esse valor |
 | Importar IR `.wav` | não feito | mesmo bloqueio do `0x71`; também falta reamostrar para 48 kHz e 2048 amostras como o HX Edit faz |
-| Identificar capturas na lista de IRs | não feito | [fato] os slots com captura começam com `0.5, -0.5, 3.0, escala, 1871/1024` (slots 003 e 004 do backup); dá para marcar pelo conteúdo (`0x0b`) |
+| Identificar capturas na lista de IRs | feito | [fato] os slots com captura começam com `0.5, -0.5, 3.0, escala, 1871/1024` (slots 003 e 004 do backup; os IRs de cab 000 e 001 não); a interface lê cada slot e o seletor do bloco NAM mostra só as capturas |
 | Tap tempo | não feito | [fato] tocar o tap muda a configuração 16 (tempo do preset); o app pode calcular o BPM dos toques e escrever a 16. Comando próprio de tap: desconhecido |
 | Cadeia de sinal: mover, adicionar e remover blocos, trocar modelo, série ou paralelo | não feito | [fato] `0x27` põe um modelo num bloco, `0x2d` remove, `0x4e` seleciona; o notify `0x31` informa bloco movido `{0x4b, 0x4c}`, mas o comando de mover é desconhecido; split e join são células da grade (posições 9, 10 e 19). Precisa de captura do HX Edit |
 | Atribuição de bypass e controllers | não feito | seções 3 (footswitches) e 4 (controllers) do preset; o evento `0x22` traz as chaves do comando 37 do tonepush; comando de escrita desconhecido |

@@ -14,6 +14,7 @@ pub mod globals;
 pub mod link;
 pub mod midi;
 pub mod msg;
+pub mod nam;
 pub mod notify;
 pub mod preset;
 pub mod restore;

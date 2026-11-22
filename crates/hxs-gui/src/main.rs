@@ -12,6 +12,7 @@ use hxs_core::backup;
 use hxs_core::catalog::{self, Catalog, Model, NameStyle, Param, ParamKind, ROLE_CAPTURE_SLOT};
 use hxs_core::device::{DeviceHandle, Event, Options, Pending, Snapshot, snapshot_number};
 use hxs_core::globals::Globals;
+use hxs_core::nam;
 use hxs_core::notify::Notification;
 use hxs_core::preset::{Block, PresetFile};
 use hxs_core::restore::{self, Plan};
@@ -44,8 +45,25 @@ enum Tab {
 enum JobResult {
     Text(String),
     Plan(PathBuf, Plan),
-    Irs(Vec<IndexedEntry>),
+    Irs(Vec<IrSlot>),
     EditBuffer(Vec<u8>),
+}
+
+#[derive(Clone)]
+struct IrSlot {
+    index: u64,
+    name: String,
+    capture: bool,
+}
+
+/// The IR list, each slot read to tell HXtra's NAM captures from impulse responses.
+fn read_irs(s: &mut stomp::Stomp) -> hxs_core::Result<JobResult> {
+    let list: Vec<IndexedEntry> = s.ir_list()?;
+    let slots = list
+        .into_iter()
+        .map(|ir| Ok(IrSlot { capture: nam::is_capture(&s.ir_data(ir.index)?), index: ir.index, name: ir.name }))
+        .collect::<hxs_core::Result<Vec<_>>>()?;
+    Ok(JobResult::Irs(slots))
 }
 
 enum Edit {
@@ -74,7 +92,11 @@ struct App {
     catalog_path: String,
     catalog_ignored: bool,
     style: NameStyle,
-    irs: Vec<IndexedEntry>,
+    irs: Vec<IrSlot>,
+    nam_file: String,
+    nam_slot: u64,
+    nam_name: String,
+    confirm_nam: bool,
     ops: Vec<(String, Pending<()>)>,
     job: Option<(String, Pending<JobResult>)>,
     tab: Tab,
@@ -109,6 +131,10 @@ impl App {
             catalog_ignored: false,
             style: NameStyle::Unit,
             irs: Vec::new(),
+            nam_file: String::new(),
+            nam_slot: 1,
+            nam_name: String::new(),
+            confirm_nam: false,
             ops: Vec::new(),
             job: None,
             tab: Tab::Preset,
@@ -200,7 +226,7 @@ impl App {
         });
         self.catalog_ignored = false;
         self.check_catalog();
-        self.start_job("reading the IR list", |s| Ok(JobResult::Irs(s.ir_list()?)));
+        self.start_job("reading the IR list", read_irs);
     }
 
     fn load_edit_buffer(&mut self, bytes: Vec<u8>) {
@@ -248,7 +274,8 @@ impl App {
                     self.confirm_restore = false;
                 }
                 Ok(JobResult::Irs(irs)) => {
-                    self.note(format!("{label}: {} IRs and captures", irs.len()));
+                    let captures = irs.iter().filter(|i| i.capture).count();
+                    self.note(format!("{label}: {} IRs and {captures} NAM captures", irs.len() - captures));
                     self.irs = irs;
                 }
                 Ok(JobResult::EditBuffer(b)) => self.load_edit_buffer(b),
@@ -552,14 +579,59 @@ impl App {
             ui.horizontal(|ui| {
                 ui.heading("IRs and NAM captures");
                 if ui.add_enabled(connected, egui::Button::new("Refresh")).clicked() {
-                    self.start_job("reading the IR list", |s| Ok(JobResult::Irs(s.ir_list()?)));
+                    self.start_job("reading the IR list", read_irs);
                 }
                 ui.checkbox(&mut self.allow_ir_delete, "allow emptying slots");
+            });
+            ui.label("Upload a NAM A2 Lite capture (.nam): it is converted as HXtra does and stored in an empty IR slot; the .nam itself is not kept.");
+            ui.horizontal(|ui| {
+                ui.label(".nam file:");
+                ui.add(egui::TextEdit::singleline(&mut self.nam_file).desired_width(420.0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Into IR slot:");
+                ui.add(egui::DragValue::new(&mut self.nam_slot).range(1..=IR_SLOTS));
+                ui.label("Name (empty: the capture's own):");
+                ui.add(egui::TextEdit::singleline(&mut self.nam_name).desired_width(220.0).char_limit(stomp::MAX_IR_NAME));
+                let taken = self.irs.iter().find(|i| i.index + 1 == self.nam_slot).map(|i| i.name.clone());
+                match &taken {
+                    Some(n) => {
+                        ui.label(format!("slot holds \"{n}\": empty it first"));
+                    }
+                    None => {
+                        ui.checkbox(&mut self.confirm_nam, "write that slot");
+                    }
+                }
+                if ui.add_enabled(connected && self.confirm_nam && taken.is_none(), egui::Button::new("Upload capture")).clicked() {
+                    self.confirm_nam = false;
+                    let (file, slot, name) = (PathBuf::from(&self.nam_file), self.nam_slot - 1, self.nam_name.trim().to_owned());
+                    self.start_job("uploading the capture", move |s| {
+                        let text = std::fs::read_to_string(&file)?;
+                        let c = nam::convert(&text)?;
+                        let name = match name.is_empty() {
+                            true => c.name.clone().ok_or_else(|| hxs_core::Error::Nam("the capture has no name: type one".into()))?,
+                            false => name,
+                        };
+                        let data = c.ir_bytes();
+                        let info = stomp::new_ir_info(slot, &name, &data)?;
+                        s.batch_begin()?;
+                        let written = s.upload_ir(slot, &info, &data);
+                        let ended = s.batch_end();
+                        written?;
+                        ended?;
+                        let back = s.ir_data(slot)?;
+                        match back == data {
+                            true => read_irs(s),
+                            false => Err(hxs_core::Error::Nam(format!("IR {:03} was written but reads back different", slot + 1))),
+                        }
+                    });
+                }
             });
             let mut delete = None;
             egui::Grid::new("irs").striped(true).show(ui, |ui| {
                 for ir in &self.irs {
                     ui.label(format!("{:03}", ir.index + 1));
+                    ui.label(if ir.capture { "NAM capture" } else { "IR" });
                     ui.label(&ir.name);
                     if ui.add_enabled(connected && self.allow_ir_delete, egui::Button::new("Empty")).clicked() {
                         delete = Some(ir.index);
@@ -575,7 +647,7 @@ impl App {
                     let ended = s.batch_end();
                     deleted?;
                     ended?;
-                    Ok(JobResult::Irs(s.ir_list()?))
+                    read_irs(s)
                 });
             }
         });
@@ -723,7 +795,7 @@ fn preset_view(p: &PresetFile) -> (Vec<Block>, Vec<String>) {
     (blocks, names)
 }
 
-fn block_ui(ui: &mut egui::Ui, b: &mut Block, model: Option<&Model>, style: NameStyle, hidden: bool, irs: &[IndexedEntry], edits: &mut Vec<Edit>) {
+fn block_ui(ui: &mut egui::Ui, b: &mut Block, model: Option<&Model>, style: NameStyle, hidden: bool, irs: &[IrSlot], edits: &mut Vec<Edit>) {
     let position = snapshot::slot_label(b.position).unwrap_or_else(|| format!("#{}", b.position));
     let title = match model {
         Some(m) if m.is_capture() => format!("{position}  Capture: {}", m.display_name(style)),
@@ -758,7 +830,7 @@ fn block_ui(ui: &mut egui::Ui, b: &mut Block, model: Option<&Model>, style: Name
     });
 }
 
-fn param_ui(ui: &mut egui::Ui, p: Option<&Param>, v: &mut Value, irs: &[IndexedEntry], id: (usize, usize)) -> bool {
+fn param_ui(ui: &mut egui::Ui, p: Option<&Param>, v: &mut Value, irs: &[IrSlot], id: (usize, usize)) -> bool {
     let number = v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)).unwrap_or(0.0);
     match p {
         Some(p) if p.role.as_deref() == Some(ROLE_CAPTURE_SLOT) => capture_ui(ui, v, number, irs, id),
@@ -814,11 +886,15 @@ fn param_ui(ui: &mut egui::Ui, p: Option<&Param>, v: &mut Value, irs: &[IndexedE
     }
 }
 
-fn capture_ui(ui: &mut egui::Ui, v: &mut Value, number: f64, irs: &[IndexedEntry], id: (usize, usize)) -> bool {
+fn capture_ui(ui: &mut egui::Ui, v: &mut Value, number: f64, irs: &[IrSlot], id: (usize, usize)) -> bool {
     let mut slot = number.round().clamp(0.0, IR_SLOTS as f64) as u64;
-    let name = |s: u64| irs.iter().find(|i| i.index + 1 == s).map_or("(empty)".to_owned(), |i| i.name.clone());
-    egui::ComboBox::from_id_salt(("capture", id)).width(260.0).selected_text(format!("{slot:03} {}", name(slot))).show_ui(ui, |ui| {
-        for ir in irs {
+    let name = |s: u64| match irs.iter().find(|i| i.index + 1 == s) {
+        Some(i) if i.capture => i.name.clone(),
+        Some(i) => format!("{} (an IR, not a capture)", i.name),
+        None => "(empty slot)".to_owned(),
+    };
+    egui::ComboBox::from_id_salt(("capture", id)).width(300.0).selected_text(format!("{slot:03} {}", name(slot))).show_ui(ui, |ui| {
+        for ir in irs.iter().filter(|i| i.capture) {
             ui.selectable_value(&mut slot, ir.index + 1, format!("{:03} {}", ir.index + 1, ir.name));
         }
     });

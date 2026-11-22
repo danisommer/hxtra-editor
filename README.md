@@ -22,6 +22,8 @@ Early, command line only, Windows tested (HX Stomp, HXtra v1.2.1 on stock 3.80.0
 | `hxs inspect <file.l6p> [--hidden]` | sections of a preset file, its blocks (named with a catalog) and its six snapshots | no (offline) |
 | `hxs show SLOT [--hidden]` | a stored preset's blocks with model names and each parameter's value as the unit shows it, then its snapshots | no |
 | `hxs catalog [SEARCH]` | the model catalog in use, or the models whose names contain SEARCH | no (offline) |
+| `hxs capture FILE.nam [--wav OUT.wav]` | converts a NAM A2 Lite capture as HXtra's NAM block plays it (byte for byte as HXtra's `nam2ir.py`), optionally as a .wav for HX Edit | no (offline) |
+| `hxs upload-capture FILE.nam --slot N [--name NAME]` | dry run by default; with `--yes` converts the capture, writes it into an empty User IR slot and reads it back | yes, one IR slot |
 | `hxs restore-preset <file.l6p> --slot N --name NAME` | dry run by default; with `--yes` writes the file into the slot and reads it back to compare byte for byte | yes, one slot |
 | `hxs restore-globals <backup>` | dry run by default; with `--yes` writes the global settings with their original bytes (HX Edit's restore turns some ints into floats and rounds floats) and reads them back | yes |
 | `hxs monitor [--seconds N] [--all] [--midi-channel N]` | keeps the connection open and prints the unit's events live (settings, parameters, snapshots with their bank when known, preset loads, unknown notifications); accepts `select SLOT`, `set ID VALUE`, `param BLOCK PARAM VALUE` (with a catalog PARAM can be a name and VALUE is typed and range-checked), `block BLOCK on\|off`, `snapshot 1-6` (over MIDI CC 69, which reaches HXtra's snapshots 4–6) and `quit` | only what you type; nothing is saved to a preset |

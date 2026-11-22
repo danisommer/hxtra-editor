@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use rmpv::Value;
+use sha2::{Digest, Sha256};
 
 use crate::link::Link;
 use crate::msg::{self, empty_map, int_map};
@@ -413,6 +414,31 @@ fn upload_params(setlist: u64, slot: usize, name: &str, flags: ListFlags, file: 
     p
 }
 
+pub const MAX_IR_NAME: usize = 64;
+
+/// The info map of a new User IR, with the fields HX Edit sends on an import (capture 12):
+/// `0x72: 1`, `0x73: 3`, flags off. `0x71` is a u32 whose meaning is not known (not a CRC32,
+/// Adler-32, FNV or Murmur hash of the data or of the .wav); it gets the first 4 bytes of the
+/// data's SHA-256.
+pub fn new_ir_info(slot: u64, name: &str, data: &[u8]) -> Result<Value> {
+    match (name.is_empty(), name.len() <= MAX_IR_NAME, name.bytes().all(|b| (0x20..0x7f).contains(&b))) {
+        (false, true, true) => {}
+        _ => return Err(Error::Backup(format!("an IR name is 1 to {MAX_IR_NAME} printable ASCII characters, not {name:?}"))),
+    }
+    let digest = Sha256::digest(data);
+    let id = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    Ok(int_map(&[
+        (key::IR_INDEX, Value::from(slot)),
+        (0x71, Value::from(id)),
+        (key::NAME, Value::from(format!("{name}\0"))),
+        (0x72, Value::from(1)),
+        (0x73, Value::from(3)),
+        (0x7b, Value::from(false)),
+        (0x7c, Value::from(false)),
+        (0x7d, Value::from(0)),
+    ]))
+}
+
 /// The IR's own info map (as the 0x0c read gives it) with 0x70 set to `slot`,
 /// then `0x6e: str(data)`: HX Edit's 0x09 import.
 fn ir_upload_params(slot: u64, info: &Value, data: &[u8]) -> Result<Vec<u8>> {
@@ -556,6 +582,15 @@ mod tests {
     fn save_request_matches_hx_edit() {
         let req = msg::encode_request(1037, editor_cmd::SAVE_PRESET, save_params(0, 11, "SAVE TEST"));
         assert_eq!(req, hex("8366cd040d644765836b006c0b6daa53415645205445535400"));
+    }
+
+    #[test]
+    fn new_ir_info_has_hx_edits_fields_in_its_order() {
+        let info = new_ir_info(2, "VOX AC30 NAM", &[0; 8]).unwrap();
+        let keys: Vec<u64> = info.as_map().unwrap().iter().filter_map(|(k, _)| k.as_u64()).collect();
+        assert_eq!(keys, vec![0x70, 0x71, 0x6d, 0x72, 0x73, 0x7b, 0x7c, 0x7d]);
+        assert_eq!(msg::get(&info, 0x6d).and_then(Value::as_str), Some("VOX AC30 NAM\0"));
+        assert!(new_ir_info(2, "", &[]).is_err() && new_ir_info(2, "ação", &[]).is_err());
     }
 
     #[test]

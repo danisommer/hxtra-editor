@@ -66,6 +66,27 @@ enum Command {
     },
     /// Describe the model catalog in use, or list the models whose names contain SEARCH.
     Catalog { search: Option<String> },
+    /// Convert a NAM A2 Lite capture (.nam) and write it into an empty User IR slot (a dry run
+    /// unless --yes), then read it back. Set the NAM A2 Lite block's Model to that slot.
+    UploadCapture {
+        file: PathBuf,
+        /// The IR slot, numbered from 1 as the unit shows them; it must be empty.
+        #[arg(long)]
+        slot: u64,
+        /// The slot's name (default: the capture's own name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Really write the slot.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Convert a NAM A2 Lite capture (.nam) as HXtra's NAM block plays it (no device needed).
+    Capture {
+        file: PathBuf,
+        /// Also write it as a .wav that HX Edit can import into a User IR slot.
+        #[arg(long)]
+        wav: Option<PathBuf>,
+    },
     /// Show the device, its setlists and the current preset.
     Info,
     /// List the presets of a setlist in slot order.
@@ -149,6 +170,8 @@ fn main() -> Result<()> {
         Command::Presets { setlist } => presets(timeout, setlist),
         Command::Show { slot, setlist, hidden } => show(timeout, slot, setlist, labels()?, hidden),
         Command::Catalog { ref search } => describe_catalog(&labels()?, search.as_deref()),
+        Command::Capture { ref file, ref wav } => capture(file, wav.as_deref()),
+        Command::UploadCapture { ref file, slot, ref name, yes } => upload_capture(timeout, file, slot, name.as_deref(), yes),
         Command::Backup { dir, setlist } => run_backup(timeout, &dir, setlist),
         Command::Inspect { ref file, hidden } => inspect(file, labels()?, hidden),
         Command::RestorePreset { file, slot, name, setlist, yes } => restore_preset(timeout, &file, slot, &name, setlist, yes),
@@ -493,6 +516,57 @@ fn show(timeout: Duration, slot: usize, setlist: u64, labels: Labels, hidden: bo
     println!("setlist {setlist} slot {slot:03} \"{}\"", entry.name);
     print_blocks(&p, &labels, hidden)?;
     print_snapshots(&p)
+}
+
+fn capture(file: &Path, wav: Option<&Path>) -> Result<()> {
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let c = hxs_core::nam::convert(&text).with_context(|| format!("converting {}", file.display()))?;
+    println!(
+        "\"{}\": {} samples, scale 2^{}, input level {}, loudness {}, sha256 {}",
+        c.name.as_deref().unwrap_or("(no name)"),
+        c.samples.len(),
+        c.exponent,
+        c.input_dbu.map_or("none".into(), |d| format!("{d} dBu")),
+        c.loudness.map_or("none".into(), |l| format!("{l:.1} dB")),
+        backup::sha256_hex(&c.ir_bytes())
+    );
+    if let Some(out) = wav {
+        std::fs::write(out, c.wav_bytes()).with_context(|| format!("writing {}", out.display()))?;
+        println!("wrote {}", out.display());
+    }
+    Ok(())
+}
+
+fn upload_capture(timeout: Duration, file: &Path, number: u64, name: Option<&str>, yes: bool) -> Result<()> {
+    let slot = number.checked_sub(1).filter(|&s| s < 128).context("IR slots are numbered 1..128")?;
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let c = hxs_core::nam::convert(&text).with_context(|| format!("converting {}", file.display()))?;
+    let name = name.map(str::to_owned).or_else(|| c.name.clone()).context("the capture has no name: pass --name")?;
+    let data = c.ir_bytes();
+    let info = hxs_core::stomp::new_ir_info(slot, &name, &data)?;
+    let mut stomp = connect(timeout)?;
+    if let Some(taken) = stomp.ir_list()?.into_iter().find(|i| i.index == slot) {
+        anyhow::bail!("IR {number:03} holds \"{}\"; empty it first (delete-ir {number}) or pick another slot", taken.name);
+    }
+    println!("IR {number:03} (empty) <- \"{name}\" ({} bytes, sha256 {})", data.len(), backup::sha256_hex(&data));
+    if !yes {
+        println!("dry run: nothing written (add --yes to write the slot)");
+        return Ok(());
+    }
+    stomp.batch_begin()?;
+    let written = stomp.upload_ir(slot, &info, &data);
+    let ended = stomp.batch_end();
+    written.context("uploading the capture")?;
+    ended?;
+    let back = stomp.ir_data(slot)?;
+    let back_info = stomp.ir_info(slot)?;
+    println!("info sent      {info}");
+    println!("info read back {back_info}");
+    match back == data {
+        true => println!("read back: identical; set the NAM A2 Lite block's Model to {number}"),
+        false => anyhow::bail!("read back differs: sent sha256 {}, slot holds {} bytes, sha256 {}", backup::sha256_hex(&data), back.len(), backup::sha256_hex(&back)),
+    }
+    Ok(())
 }
 
 fn describe_catalog(labels: &Labels, search: Option<&str>) -> Result<()> {
