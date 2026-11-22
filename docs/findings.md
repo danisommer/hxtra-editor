@@ -312,6 +312,23 @@ Tudo [fato] da captura, salvo quando marcado.
 - [fato] No arquivo: a seção 3 é a lista FS1..FS5; o bypass ficou na posição 3 (FS4) como `{10: 7, 11: {0: 1, 5: rótulo, 6: 458496, 7: true, 8: bloco}, ...}` ([hipótese] `6` é a cor do LED). A seção 4 é a lista de fontes de controller; a posição 1 (EXP 1) guarda `{1: {1: 4, 2: mínimo, 3: máximo, 5: bloco, 6: {...}}}`.
 - [em aberto] `0x21 {0x66: n}` e `0x24` (o HX Edit os envia junto; parecem consultas da tela) e como a fonte 4 escolhe o footswitch.
 
+## Nomes, cores e ordem dos presets pelo HX Edit (2026-11-22, captura `24`, slot 011)
+
+| Ação | Comando | Parâmetros | Notify |
+|---|---|---|---|
+| Nome de snapshot | `0x59` | `{0x5c: snapshot do banco ativo, 0x6d: nome}` | `0x2b` |
+| Cor de snapshot | `0x62` | `{0x5c, 0x42: cor}` (7) | `0x30` |
+| Nome do footswitch | `0x3b` | `{0x66: footswitch, 0x6d: nome}` | `0x25` `{0x46}` |
+| Cor do footswitch | `0x3d` | `{0x66, 0x42: cor}` (2) | `0x25` |
+| Parâmetro no FS5 | `0x25` com fonte **5** | | `0x22` |
+| Mover o bypass para o FS2 | `0x38` `{0x62, 0x66: 1}` | o aparelho tira do footswitch anterior sozinho | `0x21` (saiu do FS4), `0x1f` (entrou no FS2) |
+| Arrastar um preset na lista | librarian `0xff`, `0x01`, `0x04`, `0xfe`, **`0x02`**, `0xfe` | `0x02 {0x6b: setlist, 0x6e: blob, 0x65: 2}`: o blob é a **lista inteira na nova ordem**, `[{u16 id do arquivo: {0x6d, 0x7b, 0x7c, 0x7d: u32}}]` (sempre com essas larguras); status 1 e conclusão | `0x03` `{0x44: 108, 0x79: 144}` |
+
+- [fato, relato do usuário] O HX Edit não dá nome nem cor a um **bloco**: o nome e a cor são do **footswitch**.
+- [fato] Arrastar o 011 para baixo trocou as posições 11 e 12 (arquivos 14 e 10); arrastar de volta destrocou.
+- [inferência] Fonte de controller 4 = FS4 e 5 = FS5 (a 5 é fato; a 4 é a outra atribuição a footswitch vista). FS1–FS3 continuam sem número conhecido.
+- [em aberto] A paleta das cores (os números 0..15 e o que cada um é).
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

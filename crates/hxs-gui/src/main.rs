@@ -50,6 +50,7 @@ enum JobResult {
     EditBuffer(Vec<u8>),
     Favorites(Vec<FavoriteView>),
     Lists(Vec<IrSlot>, Vec<FavoriteView>),
+    Presets(Vec<PresetEntry>),
 }
 
 #[derive(Clone)]
@@ -212,6 +213,10 @@ struct App {
     add_position: usize,
     add_folder: usize,
     add_item: usize,
+    snapshot_name: String,
+    snapshot_color: u64,
+    footswitch_labels: [String; FOOTSWITCHES as usize],
+    footswitch_colors: [u64; FOOTSWITCHES as usize],
 }
 
 impl App {
@@ -263,6 +268,10 @@ impl App {
             add_position: 0,
             add_folder: 0,
             add_item: 0,
+            snapshot_name: String::new(),
+            snapshot_color: 0,
+            footswitch_labels: Default::default(),
+            footswitch_colors: [0; FOOTSWITCHES as usize],
         };
         app.load_catalog(None);
         app
@@ -401,6 +410,12 @@ impl App {
                     self.note(format!("{label}: {} favorites", f.len()));
                     self.favorites = f;
                 }
+                Ok(JobResult::Presets(list)) => {
+                    self.note(format!("{label}: done"));
+                    if let Some(d) = self.device.as_mut() {
+                        d.presets = list;
+                    }
+                }
                 Ok(JobResult::Lists(irs, f)) => {
                     self.note(format!("{label}: {} IR slots, {} favorites", irs.len(), f.len()));
                     self.irs = irs;
@@ -531,7 +546,8 @@ impl App {
             return;
         };
         let (setlist, current) = (d.current.setlist, d.current.slot as usize);
-        let (mut chosen, mut copy, mut export) = (None, None, None);
+        let (mut chosen, mut copy, mut export, mut swap) = (None, None, None, None);
+        let last = d.presets.len().saturating_sub(1);
         egui::ScrollArea::vertical().id_salt("presets").show(ui, |ui| {
             for p in &d.presets {
                 let r = ui.selectable_label(p.slot == current, format!("{:03}  {}", p.slot, p.name)).on_hover_text("Right-click: copy or export");
@@ -547,12 +563,32 @@ impl App {
                         export = Some((p.slot, p.name.clone()));
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui.add_enabled(p.slot > 0, egui::Button::new("Move up")).clicked() {
+                        swap = Some((p.slot, p.slot - 1));
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(p.slot < last, egui::Button::new("Move down")).clicked() {
+                        swap = Some((p.slot, p.slot + 1));
+                        ui.close_menu();
+                    }
                 });
             }
+        });
+        let reordered = swap.map(|(a, b)| {
+            let mut order = d.presets.clone();
+            order.swap(a, b);
+            order
         });
         if let Some(slot) = chosen {
             let p = self.handle.select_preset(setlist, slot);
             self.op(format!("load preset {slot:03}"), p);
+        }
+        if let Some(order) = reordered {
+            self.start_job("moving the preset", move |s| {
+                s.reorder_presets(setlist, &order)?;
+                Ok(JobResult::Presets(s.preset_list(setlist)?))
+            });
         }
         if let Some((slot, name)) = copy {
             (self.copy_from, self.copy_name, self.confirm_copy, self.tab) = (slot, name, false, Tab::Library);
@@ -607,6 +643,8 @@ impl App {
             }
             ui.checkbox(&mut self.show_hidden, "hidden parameters");
         });
+        self.snapshot_row(ui);
+        self.footswitch_section(ui);
         self.tempo_row(ui);
         self.dsp_row(ui);
         self.add_block_row(ui);
@@ -716,6 +754,65 @@ impl App {
                 s.add_block(position, model, cab, kind)?;
                 Ok(JobResult::EditBuffer(s.edit_buffer()?))
             });
+        }
+    }
+
+    fn snapshot_row(&mut self, ui: &mut egui::Ui) {
+        let Some(n) = self.device.as_ref().and_then(|d| d.snapshot) else { return };
+        let index = (n - 1) % 3;
+        let mut job = None;
+        ui.horizontal(|ui| {
+            ui.label(format!("Snapshot {n}:"));
+            ui.add(egui::TextEdit::singleline(&mut self.snapshot_name).desired_width(100.0).char_limit(stomp::MAX_SNAPSHOT_NAME));
+            if ui.button("Rename").clicked() {
+                job = Some((true, self.snapshot_name.clone(), 0));
+            }
+            ui.add(egui::DragValue::new(&mut self.snapshot_color).range(0..=15).prefix("color "));
+            if ui.button("Set color").on_hover_text("The color number as the unit stores it; the palette is not mapped yet").clicked() {
+                job = Some((false, String::new(), self.snapshot_color));
+            }
+        });
+        match job {
+            Some((true, name, _)) => self.start_job("renaming the snapshot", move |s| {
+                s.rename_snapshot(index, &name)?;
+                Ok(JobResult::EditBuffer(s.edit_buffer()?))
+            }),
+            Some((false, _, color)) => self.start_job("coloring the snapshot", move |s| {
+                s.set_snapshot_color(index, color)?;
+                Ok(JobResult::Text(format!("snapshot {n}: color {color}")))
+            }),
+            None => {}
+        }
+    }
+
+    fn footswitch_section(&mut self, ui: &mut egui::Ui) {
+        let mut job = None;
+        egui::CollapsingHeader::new("Footswitch labels and colors").show(ui, |ui| {
+            egui::Grid::new("footswitches").show(ui, |ui| {
+                for fs in 0..FOOTSWITCHES as usize {
+                    ui.label(format!("FS{}", fs + 1));
+                    ui.add(egui::TextEdit::singleline(&mut self.footswitch_labels[fs]).desired_width(140.0).char_limit(stomp::MAX_PRESET_NAME));
+                    if ui.button("Set label").clicked() {
+                        job = Some((fs as u64, Some(self.footswitch_labels[fs].clone()), None));
+                    }
+                    ui.add(egui::DragValue::new(&mut self.footswitch_colors[fs]).range(0..=15).prefix("color "));
+                    if ui.button("Set color").clicked() {
+                        job = Some((fs as u64, None, Some(self.footswitch_colors[fs])));
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+        match job {
+            Some((fs, Some(label), _)) => self.start_job("labeling the footswitch", move |s| {
+                s.set_footswitch_label(fs, &label)?;
+                Ok(JobResult::Text(format!("FS{} labeled \"{label}\"", fs + 1)))
+            }),
+            Some((fs, None, Some(color))) => self.start_job("coloring the footswitch", move |s| {
+                s.set_footswitch_color(fs, color)?;
+                Ok(JobResult::Text(format!("FS{}: color {color}", fs + 1)))
+            }),
+            _ => {}
         }
     }
 
@@ -1350,6 +1447,14 @@ fn controller_menu(ui: &mut egui::Ui, block: u64, index: usize, value: &Value, e
     ui.menu_button("ctl", |ui| {
         if ui.button("Assign to EXP 1").clicked() {
             edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::Exp1 });
+            ui.close_menu();
+        }
+        if ui.button("Assign to FS4").clicked() {
+            edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::Fs4 });
+            ui.close_menu();
+        }
+        if ui.button("Assign to FS5").clicked() {
+            edits.push(Edit::Controller { block, index, source: stomp::ControllerSource::Fs5 });
             ui.close_menu();
         }
         if ui.button("Remove controller").clicked() {

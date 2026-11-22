@@ -46,14 +46,20 @@ mod editor_cmd {
     pub const CONTROLLER_MIN: u8 = 0x41;
     pub const CONTROLLER_MAX: u8 = 0x42;
     pub const SNAPSHOT_BYPASS: u8 = 0x66;
+    pub const SNAPSHOT_NAME: u8 = 0x59;
+    pub const SNAPSHOT_COLOR: u8 = 0x62;
+    pub const FOOTSWITCH_LABEL: u8 = 0x3b;
+    pub const FOOTSWITCH_COLOR: u8 = 0x3d;
 }
 
-/// A controller source as `0x25` names it (capture 23): 0 none, 1 EXP 1. [hypothesis] 4 is a
-/// footswitch, but which one is not known yet.
+/// A controller source as `0x25` names it (captures 23, 24): 0 none, 1 EXP 1, 5 FS5 (fact);
+/// 4 FS4 (inference: the other footswitch assignment seen). FS1..FS3 are not known yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerSource {
     None,
     Exp1,
+    Fs4,
+    Fs5,
 }
 
 impl ControllerSource {
@@ -61,13 +67,38 @@ impl ControllerSource {
         match self {
             ControllerSource::None => (0, 0),
             ControllerSource::Exp1 => (1, 4),
+            ControllerSource::Fs4 => (4, 4),
+            ControllerSource::Fs5 => (5, 4),
         }
     }
+}
+
+pub const MAX_SNAPSHOT_NAME: usize = 10;
+
+/// The preset list in a new order, as HX Edit sends it to librarian 0x02 (capture 24): an array16
+/// of `{u16 file id: {0x6d: name with NUL, 0x7b: bool, 0x7c: bool, 0x7d: u32}}`, those widths
+/// even for small values.
+pub fn setlist_blob(order: &[PresetEntry]) -> Vec<u8> {
+    let mut out = vec![0xdc];
+    out.extend_from_slice(&(order.len() as u16).to_be_bytes());
+    for e in order {
+        out.extend_from_slice(&[0x81, 0xcd]);
+        out.extend_from_slice(&(e.file_id as u16).to_be_bytes());
+        out.extend_from_slice(&[0x84, key::NAME as u8]);
+        msg::write_raw_str(&mut out, format!("{}\0", e.name).as_bytes());
+        for (k, v) in [(0x7b, e.flags.flag_7b), (0x7c, e.flags.flag_7c)] {
+            out.extend_from_slice(&[k, if v.unwrap_or(false) { 0xc3 } else { 0xc2 }]);
+        }
+        out.extend_from_slice(&[0x7d, 0xce]);
+        out.extend_from_slice(&(e.flags.flag_7d.unwrap_or(0) as u32).to_be_bytes());
+    }
+    out
 }
 
 mod librarian_cmd {
     pub const SETLISTS: u8 = 0x00;
     pub const PRESET_LIST: u8 = 0x01;
+    pub const SETLIST_WRITE: u8 = 0x02;
     pub const PRESET_FILE: u8 = 0x04;
     pub const PRESET_UPLOAD: u8 = 0x08;
     pub const IR_UPLOAD: u8 = 0x09;
@@ -452,6 +483,61 @@ impl Stomp {
         self.session.request(self.editor, editor_cmd::SNAPSHOT_BYPASS, params).map(drop)
     }
 
+    /// Rename a snapshot of the live bank (0..2; editor 0x59, capture 24; notify 0x2b).
+    pub fn rename_snapshot(&mut self, index: u64, name: &str) -> Result<()> {
+        check_label(name, MAX_SNAPSHOT_NAME)?;
+        let params = int_map(&[(key::SNAPSHOT, Value::from(index)), (key::NAME, Value::from(format!("{name}\0")))]);
+        self.session.request(self.editor, editor_cmd::SNAPSHOT_NAME, params).map(drop)
+    }
+
+    /// A snapshot's color (editor 0x62 `{0x5c, 0x42}`, capture 24; notify 0x30).
+    pub fn set_snapshot_color(&mut self, index: u64, color: u64) -> Result<()> {
+        let params = int_map(&[(key::SNAPSHOT, Value::from(index)), (COLOR, Value::from(color))]);
+        self.session.request(self.editor, editor_cmd::SNAPSHOT_COLOR, params).map(drop)
+    }
+
+    /// A footswitch's label (0..4 = FS1..FS5; editor 0x3b `{0x66, 0x6d}`, capture 24).
+    pub fn set_footswitch_label(&mut self, footswitch: u64, label: &str) -> Result<()> {
+        check_label(label, MAX_PRESET_NAME)?;
+        let params = int_map(&[(FOOTSWITCH, Value::from(footswitch)), (key::NAME, Value::from(format!("{label}\0")))]);
+        self.session.request(self.editor, editor_cmd::FOOTSWITCH_LABEL, params).map(drop)
+    }
+
+    /// A footswitch's LED color (editor 0x3d `{0x66, 0x42}`, capture 24).
+    pub fn set_footswitch_color(&mut self, footswitch: u64, color: u64) -> Result<()> {
+        let params = int_map(&[(FOOTSWITCH, Value::from(footswitch)), (COLOR, Value::from(color))]);
+        self.session.request(self.editor, editor_cmd::FOOTSWITCH_COLOR, params).map(drop)
+    }
+
+    /// Put the setlist's presets in `order`, a reordering of its current list (librarian 0x02
+    /// with [`setlist_blob`], after the list read and batch HX Edit does, capture 24).
+    pub fn reorder_presets(&mut self, setlist: u64, order: &[PresetEntry]) -> Result<()> {
+        self.batch_begin()?;
+        let current = self.preset_list(setlist);
+        let ended = self.batch_end();
+        let current = current?;
+        ended?;
+        let ids = |l: &[PresetEntry]| {
+            let mut v: Vec<u64> = l.iter().map(|e| e.file_id).collect();
+            v.sort_unstable();
+            v
+        };
+        if ids(&current) != ids(order) {
+            return Err(Error::Protocol("the new order is not a reordering of the unit's preset list (it changed meanwhile?)".into()));
+        }
+        let mut p = vec![0x83];
+        msg::write_uint(&mut p, key::SETLIST);
+        msg::write_uint(&mut p, setlist);
+        msg::write_uint(&mut p, key::PRESET_DATA);
+        msg::write_raw_str(&mut p, &setlist_blob(order));
+        msg::write_uint(&mut p, key::FORMAT);
+        msg::write_uint(&mut p, LIBRARIAN_FORMAT);
+        let written = self.session.request_raw(self.librarian, librarian_cmd::SETLIST_WRITE, &p).map(drop);
+        let ended = self.batch_end();
+        written?;
+        ended
+    }
+
     /// Remove a block (editor 0x1c `{0x62}`, capture 22). Nothing is stored.
     pub fn remove_block(&mut self, position: u64) -> Result<()> {
         self.session.request(self.editor, editor_cmd::REMOVE_BLOCK, int_map(&[(key::BLOCK, Value::from(position))])).map(drop)
@@ -577,6 +663,14 @@ const CHANGE_MODEL_REF: u64 = 0x64;
 const MOVE_FROM: u64 = 0x4b;
 const MOVE_TO: u64 = 0x4c;
 const FOOTSWITCH: u64 = 0x66;
+const COLOR: u64 = 0x42;
+
+fn check_label(label: &str, max: usize) -> Result<()> {
+    match (label.len() <= max, label.bytes().all(|b| (0x20..0x7f).contains(&b))) {
+        (true, true) => Ok(()),
+        _ => Err(Error::Preset(format!("a label is up to {max} printable ASCII characters, not {label:?}"))),
+    }
+}
 const CONTROLLER_SOURCE: u64 = 0x4a;
 const CONTROLLER_KIND: u64 = 0x47;
 const CONTROLLER_FLAG: u64 = 0x81;
@@ -808,6 +902,15 @@ mod tests {
         assert_eq!(int_map(&exp).to_string(), "{98: 14, 29: true, 26: 0, 28: 2, 74: 1, 71: 4, 129: false}", "capture 23 at 66.676");
         let (none, none_kind) = ControllerSource::None.code();
         assert_eq!((none, none_kind), (0, 0), "capture 23 at 77.660");
+    }
+
+    #[test]
+    fn setlist_blob_matches_hx_edit() {
+        let entry = |file_id, name: &str| PresetEntry { slot: 0, file_id, name: name.into(), flags: ListFlags { flag_7b: Some(false), flag_7c: Some(false), flag_7d: Some(0) } };
+        let blob = setlist_blob(&[entry(2, "AC30 Clean"), entry(0x11, "AC30 Ambience")]);
+        let want = "dc 00 02 81 cd 00 02 84 6d ab 41 43 33 30 20 43 6c 65 61 6e 00 7b c2 7c c2 7d ce 00 00 00 00 81 cd 00 11 84 6d ae 41 43 33 30 20 41 6d 62 69 65 6e 63 65 00 7b c2 7c c2 7d ce 00 00 00 00";
+        let got: Vec<String> = blob.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(got.join(" "), want, "capture 24, the first two entries (count 2 instead of 126)");
     }
 
     #[test]
