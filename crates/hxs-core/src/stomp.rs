@@ -36,6 +36,11 @@ mod editor_cmd {
     pub const GLOBALS: u8 = 0x55;
     pub const GLOBALS_WRITE: u8 = 0x56;
     pub const SAVE_FAVORITE: u8 = 0x77;
+    pub const REMOVE_BLOCK: u8 = 0x1c;
+    pub const PUT_BLOCK: u8 = 0x27;
+    pub const CHANGE_MODEL: u8 = 0x28;
+    pub const MOVE_BLOCK: u8 = 0x2b;
+    pub const SELECT_BLOCK: u8 = 0x4e;
 }
 
 mod librarian_cmd {
@@ -364,6 +369,41 @@ impl Stomp {
         self.session.request(self.librarian, librarian_cmd::FAVORITE, int_map(&[(key::FAVORITE_INDEX, Value::from(index))]))
     }
 
+    /// Select a grid position, as HX Edit does before acting on it (editor 0x4e; notify 0x27).
+    pub fn select_block(&mut self, position: u64) -> Result<()> {
+        let params = int_map(&[(key::BLOCK, Value::from(position)), (key::PARAMETER_PATH, Value::from(0))]);
+        self.session.request(self.editor, editor_cmd::SELECT_BLOCK, params).map(drop)
+    }
+
+    /// Put a new block of `kind` (the browser item's kind) on an empty position, with the
+    /// model's defaults (editor 0x27 after selecting it, capture 22). Nothing is stored.
+    pub fn add_block(&mut self, position: u64, preset_id: u64, cab: Option<u64>, kind: u64) -> Result<()> {
+        self.select_block(position)?;
+        let body = int_map(&[(BODY_MODEL, model_ref(preset_id, cab)), (BODY_KIND, Value::from(kind)), (BODY_ENABLED, Value::from(true))]);
+        let cell = int_map(&[(CELL_TYPE, Value::from(CELL_PROCESSING)), (CELL_BODY, body)]);
+        let params = int_map(&[(key::BLOCK, Value::from(position)), (PUT_CELL, cell)]);
+        self.session.request(self.editor, editor_cmd::PUT_BLOCK, params).map(drop)
+    }
+
+    /// Change a block's model, or add or drop the cab of an amp (editor 0x28, capture 22). The
+    /// unit gives the new model its defaults: carrying values over is the caller's job.
+    pub fn change_model(&mut self, position: u64, preset_id: u64, cab: Option<u64>) -> Result<()> {
+        let params = int_map(&[(key::BLOCK, Value::from(position)), (CHANGE_MODEL_REF, model_ref(preset_id, cab))]);
+        self.session.request(self.editor, editor_cmd::CHANGE_MODEL, params).map(drop)
+    }
+
+    /// Move a block to an empty position; a position on the second row puts it in parallel
+    /// (editor 0x2b `{0x4b: from, 0x4c: to}`, capture 22; notify 0x31 echoes it).
+    pub fn move_block(&mut self, from: u64, to: u64) -> Result<()> {
+        let params = int_map(&[(MOVE_FROM, Value::from(from)), (MOVE_TO, Value::from(to))]);
+        self.session.request(self.editor, editor_cmd::MOVE_BLOCK, params).map(drop)
+    }
+
+    /// Remove a block (editor 0x1c `{0x62}`, capture 22). Nothing is stored.
+    pub fn remove_block(&mut self, position: u64) -> Result<()> {
+        self.session.request(self.editor, editor_cmd::REMOVE_BLOCK, int_map(&[(key::BLOCK, Value::from(position))])).map(drop)
+    }
+
     /// Delete a favorite (librarian 0x74, as HX Edit does in capture 12; notify 0x3b follows).
     pub fn delete_favorite(&mut self, index: u64) -> Result<()> {
         self.session.request(self.librarian, librarian_cmd::FAVORITE_DELETE, int_map(&[(key::FAVORITE_INDEX, Value::from(index))])).map(drop)
@@ -471,6 +511,26 @@ fn upload_params(setlist: u64, slot: usize, name: &str, flags: ListFlags, file: 
     msg::write_uint(&mut p, key::PRESET_DATA);
     msg::write_raw_str(&mut p, file);
     p
+}
+
+const CELL_TYPE: u64 = 19;
+const CELL_BODY: u64 = 20;
+const CELL_PROCESSING: u64 = 6;
+const BODY_MODEL: u64 = 24;
+const BODY_KIND: u64 = 9;
+const BODY_ENABLED: u64 = 10;
+const PUT_CELL: u64 = 0x63;
+const CHANGE_MODEL_REF: u64 = 0x64;
+const MOVE_FROM: u64 = 0x4b;
+const MOVE_TO: u64 = 0x4c;
+
+/// A block's model reference `{23: has a cab, 25: model, 26: cab or -1}`.
+fn model_ref(preset_id: u64, cab: Option<u64>) -> Value {
+    int_map(&[
+        (23, Value::from(cab.is_some())),
+        (25, Value::from(preset_id)),
+        (26, cab.map_or(Value::from(-1), Value::from)),
+    ])
 }
 
 pub const MAX_IR_NAME: usize = 64;
@@ -664,6 +724,17 @@ mod tests {
     fn save_request_matches_hx_edit() {
         let req = msg::encode_request(1037, editor_cmd::SAVE_PRESET, save_params(0, 11, "SAVE TEST"));
         assert_eq!(req, hex("8366cd040d644765836b006c0b6daa53415645205445535400"));
+    }
+
+    #[test]
+    fn block_edits_match_hx_edit() {
+        let enc = |v: Value| msg::encode_value(&v).iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let cell = int_map(&[(CELL_TYPE, Value::from(CELL_PROCESSING)), (CELL_BODY, int_map(&[(BODY_MODEL, model_ref(35, Some(795))), (BODY_KIND, Value::from(33)), (BODY_ENABLED, Value::from(true))]))]);
+        let put = int_map(&[(key::BLOCK, Value::from(2)), (PUT_CELL, cell)]);
+        let decoded = rmpv::decode::read_value(&mut &hex(&enc(put.clone()))[..]).unwrap();
+        assert_eq!(decoded.to_string(), "{98: 2, 99: {19: 6, 20: {24: {23: true, 25: 35, 26: 795}, 9: 33, 10: true}}}", "capture 22 at 131.724");
+        let change = int_map(&[(key::BLOCK, Value::from(2)), (CHANGE_MODEL_REF, model_ref(35, None))]);
+        assert_eq!(change.to_string(), "{98: 2, 100: {23: false, 25: 35, 26: -1}}", "capture 22 at 138.083");
     }
 
     #[test]

@@ -283,6 +283,23 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [inferência] O `0x71` é um checksum dos dados que o aparelho confere: errado, ele descarta o IR e ainda assim responde status 0. O travamento das primeiras tentativas vinha da releitura imediata (`0x0b`) enquanto o aparelho ainda tratava o IR; a sequência sem releitura não trava.
 - [fato] O `0x71` também não é nenhuma das 34 variantes de CRC-32 do catálogo do `crccheck`, sobre os dados, o `.wav` ou os floats big-endian (5 pares conhecidos). [em aberto] A fórmula está no firmware, na rotina que confere o `0x71`. Correção feita para o primeiro caso: o `hxs` agora segue a sequência do HX Edit (`0xff`, `0x09`, `0x0d`, `0xfe`) e não relê os dados; um tamanho negativo vira um erro explícito. Teste que separa as hipóteses: o HX Edit importar, com captura USB, essa mesma captura nova.
 
+## Cadeia de sinal pelo HX Edit (2026-11-22, captura `22`, rascunho no slot 011)
+
+Tudo [fato] da captura, salvo quando marcado.
+
+| Ação | Comando | Parâmetros | Notify |
+|---|---|---|---|
+| Adicionar bloco | `0x4e` `{0x62: posição, 0x1a: 0}` e depois `0x27` | `{0x62: posição, 0x63: {19: 6, 20: {24: {23: tem cab, 25: modelo, 26: cab ou -1}, 9: tipo, 10: true}}}`, **sem valores**: o aparelho põe os padrões | `0x31` `{0x62}` |
+| Trocar modelo (inclusive mono ↔ estéreo, e amp + cab ↔ amp) | `0x28` | `{0x62: posição, 0x64: {23, 25, 26}}` | `0x31` (sub 47, sem corpo) e `0x31` `{0x62}` |
+| Mover | `0x2b` | `{0x4b: de, 0x4c: para}` | `0x31` `{0x4b, 0x4c}` |
+| Remover | `0x1c` | `{0x62: posição}` (o `0x2d` anotado antes estava errado) | `0x31` sub 14 `{0x62}` |
+| Paralelo | `0x2b` para uma posição da segunda linha (11–18) | | três `0x1a` `{56: 0, 121: 1, 53: 4, 54: 9}` |
+
+- [fato] A chave 9 do corpo do bloco é o `kind` dos itens do navegador de modelos: Supro S6616 (35) é 17 como "Amp" e 33 como "Amp+Cab" com o cab 795; Simple Delay é 8. O catálogo já tem esse valor.
+- [fato] **O aparelho não preserva valores na troca de modelo**: no amp + cab o knob 2 foi de 0,92 a 0,45; depois do `0x28` para o mesmo amp sem cab, o arquivo salvo tem 0,92 (o padrão). Manter os valores em comum é trabalho do editor (`catalog::carry_values` + `0x1e`).
+- [fato] A grade sempre tem o split na célula 10 (tipo 2) e o join na 19 (tipo 3). Com um bloco na segunda linha, os dois têm `18: true` e a posição em `13` (4 e 9 aqui, os `53`/`54` do notify `0x1a`); o split guarda um modelo (`8: 257`), o join outro (`8: 151`).
+- [fato] O HX Edit salva com `0x47` depois de cada ação quando o usuário salva; o `0x05` traz um carimbo novo a cada vez.
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

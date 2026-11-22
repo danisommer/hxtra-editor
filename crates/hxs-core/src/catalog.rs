@@ -171,6 +171,19 @@ impl Catalog {
         self.by_preset_id.get(&preset_id).map(|&i| &self.models[i])
     }
 
+    /// The block kind to add `preset_id` (with `cab` for an amp + cab) as: the model browser's
+    /// item kind (17 an amp, 33 an amp + cab, 8 a delay...), which presets keep as key 9.
+    pub fn block_kind(&self, preset_id: u64, cab: Option<u64>) -> Option<u64> {
+        let items = self.browser.iter().flat_map(|f| &f.items);
+        let mut matching = items.filter(|i| i.model == Some(preset_id) && i.cab == cab);
+        matching.next().map(|i| i.kind)
+    }
+
+    /// The cab the model browser pairs with an amp in its Amp+Cab folders.
+    pub fn default_cab(&self, amp: u64) -> Option<u64> {
+        self.browser.iter().flat_map(|f| &f.items).find(|i| i.model == Some(amp) && i.cab.is_some()).and_then(|i| i.cab)
+    }
+
     /// A preset's DSP use: the fixed part plus each block's cost, and the blocks whose model
     /// the catalog does not price (their cost is left out of the total).
     pub fn dsp_total(&self, preset_ids: &[u64]) -> (u64, Vec<u64>) {

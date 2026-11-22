@@ -30,14 +30,20 @@ mod meta_key {
 }
 
 mod block_key {
+    pub const KIND: u64 = 9;
     pub const ENABLED: u64 = 10;
     pub const VALUES: u64 = 11;
     pub const MODEL: u64 = 24;
     pub const MODEL_ID: u64 = 25;
+    pub const CAB_ID: u64 = 26;
     pub const IR_HASH: u64 = 27;
     pub const PARAM_COUNT: u64 = 3;
     pub const VALUE_LIST: u64 = 4;
 }
+
+/// Grid positions: 1..=8 the first row (path A), 11..=18 the second (path B, in parallel).
+pub const ROW_A: std::ops::RangeInclusive<usize> = 1..=8;
+pub const ROW_B: std::ops::RangeInclusive<usize> = 11..=18;
 
 /// A processing block of the grid. `params` are the model's values in catalog order (a preset
 /// saved before HXtra lacks the parameters HXtra adds); `extras` follow them on delays, reverbs
@@ -46,6 +52,10 @@ mod block_key {
 pub struct Block {
     pub position: usize,
     pub preset_id: u64,
+    /// The cab of an amp + cab block (body key 24, its 26; -1 for none).
+    pub cab: Option<u64>,
+    /// The block kind (body key 9), the model browser's item kind: 17 an amp, 33 an amp + cab...
+    pub kind: Option<u64>,
     pub enabled: bool,
     pub params: Vec<Value>,
     pub extras: Vec<Value>,
@@ -63,12 +73,12 @@ impl Block {
             true => list.split_at(count),
             false => return Err(bad(&format!("{count} parameters but {} values", list.len()))),
         };
+        let model = msg::get(body, block_key::MODEL).ok_or_else(|| bad("no model"))?;
         Ok(Self {
             position,
-            preset_id: msg::get(body, block_key::MODEL)
-                .and_then(|m| msg::get(m, block_key::MODEL_ID))
-                .and_then(Value::as_u64)
-                .ok_or_else(|| bad("no model id"))?,
+            preset_id: msg::get(model, block_key::MODEL_ID).and_then(Value::as_u64).ok_or_else(|| bad("no model id"))?,
+            cab: msg::get(model, block_key::CAB_ID).and_then(Value::as_u64),
+            kind: msg::get(body, block_key::KIND).and_then(Value::as_u64),
             enabled: msg::get(body, block_key::ENABLED).and_then(Value::as_bool).ok_or_else(|| bad("no on/off state"))?,
             params: params.to_vec(),
             extras: extras.to_vec(),
@@ -253,6 +263,7 @@ mod tests {
         let blocks = p.blocks().unwrap();
         assert_eq!(p.occupied_positions(), vec![1, 3]);
         assert_eq!((blocks[0].position, blocks[0].preset_id, blocks[0].enabled, blocks[0].params.len()), (1, 124, true, 2));
+        assert_eq!((blocks[0].cab, blocks[0].kind), (None, Some(1)), "26 = -1 is no cab");
         assert!(blocks[0].extras.is_empty());
         assert_eq!((blocks[1].preset_id, blocks[1].enabled, blocks[1].extras.clone()), (636, false, vec![Value::from(true)]));
     }
