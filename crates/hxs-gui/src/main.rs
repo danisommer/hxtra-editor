@@ -617,6 +617,7 @@ impl App {
                         let id = s.ir_id_for(&data)?;
                         let info = stomp::new_ir_info(slot, &name, id)?;
                         let listed = stomp::upload_new_ir(s, slot, &info, &data)?;
+                        stomp::check_listed_ir(&listed, slot, &name, &data)?;
                         let shown = listed.into_iter().map(|ir| IrSlot { capture: ir.index == slot, index: ir.index, name: ir.name });
                         Ok(JobResult::Irs(shown.collect()))
                     });

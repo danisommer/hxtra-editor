@@ -59,6 +59,7 @@ mod key {
     pub const PRESET: u64 = 0x6c;
     pub const NAME: u64 = 0x6d;
     pub const IR_INDEX: u64 = 0x70;
+    pub const LIST_MD5: u64 = 0x68;
     pub const FORMAT: u64 = 0x65;
     pub const FAVORITE_INDEX: u64 = 0x76;
     pub const MODIFIED: u64 = 0x75;
@@ -121,10 +122,33 @@ impl ListFlags {
     }
 }
 
+/// An item of a librarian list. IR lists also give `md5`: the MD5 of the IR's data as the unit
+/// computes it (key 0x68), the same value presets use to refer to the IR.
 #[derive(Debug, Clone)]
 pub struct IndexedEntry {
     pub index: u64,
     pub name: String,
+    pub md5: Option<String>,
+}
+
+/// MD5 of IR data in lowercase hex, as the IR list's `md5` gives it.
+pub fn ir_md5(data: &[u8]) -> String {
+    md5::Md5::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Check that an IR list shows `slot` named `name` with the MD5 of `data`: how an import is
+/// verified without reading the slot's data back.
+pub fn check_listed_ir(list: &[IndexedEntry], slot: u64, name: &str, data: &[u8]) -> Result<()> {
+    let want = ir_md5(data);
+    match list.iter().find(|i| i.index == slot) {
+        None => Err(Error::Backup(format!("IR {:03} is not in the unit's list after the upload", slot + 1))),
+        Some(i) if i.name != name => Err(Error::Backup(format!("IR {:03} is listed as {:?}, not {name:?}", slot + 1, i.name))),
+        Some(IndexedEntry { md5: Some(got), .. }) if *got != want => {
+            Err(Error::Backup(format!("IR {:03} is listed with MD5 {got}, but the data sent has {want}", slot + 1)))
+        }
+        Some(IndexedEntry { md5: None, .. }) => Err(Error::Backup(format!("IR {:03} is listed without an MD5 to check", slot + 1))),
+        Some(_) => Ok(()),
+    }
 }
 
 pub struct Stomp {
@@ -267,7 +291,7 @@ impl Stomp {
 
     pub fn setlists(&mut self) -> Result<Vec<IndexedEntry>> {
         let r = self.session.request(self.librarian, librarian_cmd::SETLISTS, Value::Nil)?;
-        single_entry_maps(&r, "setlist list").map(|v| v.into_iter().map(|(index, v)| IndexedEntry { index, name: msg::text(v).unwrap_or_default() }).collect())
+        single_entry_maps(&r, "setlist list").map(|v| v.into_iter().map(|(index, v)| IndexedEntry { index, name: msg::text(v).unwrap_or_default(), md5: None }).collect())
     }
 
     /// Presets in slot order; each entry is keyed by the preset's file id.
@@ -537,7 +561,11 @@ fn indexed_list(v: &Value, index_key: u64, what: &str) -> Result<Vec<IndexedEntr
         .iter()
         .map(|item| {
             let index = msg::get(item, index_key).and_then(Value::as_u64).ok_or_else(|| missing(what, "index"))?;
-            Ok(IndexedEntry { index, name: msg::get(item, key::NAME).and_then(msg::text).unwrap_or_default() })
+            Ok(IndexedEntry {
+                index,
+                name: msg::get(item, key::NAME).and_then(msg::text).unwrap_or_default(),
+                md5: msg::get(item, key::LIST_MD5).and_then(msg::text).filter(|h| h.len() == 32),
+            })
         })
         .collect()
 }
@@ -615,6 +643,19 @@ mod tests {
     fn save_request_matches_hx_edit() {
         let req = msg::encode_request(1037, editor_cmd::SAVE_PRESET, save_params(0, 11, "SAVE TEST"));
         assert_eq!(req, hex("8366cd040d644765836b006c0b6daa53415645205445535400"));
+    }
+
+    #[test]
+    fn checks_an_import_by_the_listed_md5() {
+        assert_eq!(ir_md5(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        let data = b"abc";
+        let entry = |name: &str, md5: Option<&str>| IndexedEntry { index: 6, name: name.into(), md5: md5.map(str::to_owned) };
+        let good = [entry("VOX", Some(&ir_md5(data)))];
+        assert!(check_listed_ir(&good, 6, "VOX", data).is_ok());
+        assert!(check_listed_ir(&good, 5, "VOX", data).is_err(), "another slot");
+        assert!(check_listed_ir(&good, 6, "VOX 2", data).is_err(), "another name");
+        assert!(check_listed_ir(&[entry("VOX", Some("0e454949e7bbb92e905eaeb106abb1d2"))], 6, "VOX", data).is_err(), "other data");
+        assert!(check_listed_ir(&[entry("VOX", None)], 6, "VOX", data).is_err(), "no md5");
     }
 
     #[test]

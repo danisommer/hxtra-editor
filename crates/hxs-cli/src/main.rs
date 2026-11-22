@@ -556,12 +556,8 @@ fn upload_capture(timeout: Duration, file: &Path, number: u64, name: Option<&str
         return Ok(());
     }
     let listed = hxs_core::stomp::upload_new_ir(&mut stomp, slot, &info, &data).context("uploading the capture")?;
-    match listed.iter().find(|i| i.index == slot) {
-        Some(i) if i.name == name => println!("listed: IR {number:03} \"{}\"; set the NAM A2 Lite block's Model to {number}", i.name),
-        Some(i) => anyhow::bail!("IR {number:03} is listed as \"{}\", not \"{name}\"", i.name),
-        None => anyhow::bail!("IR {number:03} is not in the unit's list after the upload"),
-    }
-    println!("the unit stores it after the transfer; check its data later, on a new connection (hxs backup or restore compares it)");
+    hxs_core::stomp::check_listed_ir(&listed, slot, &name, &data)?;
+    println!("checked: the unit lists IR {number:03} \"{name}\" with the MD5 of the data sent ({}); set the NAM A2 Lite block's Model to {number}", hxs_core::stomp::ir_md5(&data));
     Ok(())
 }
 
