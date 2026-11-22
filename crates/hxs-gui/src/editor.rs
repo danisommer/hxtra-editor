@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use eframe::egui::{Align2, Color32, FontId, Key, Modifiers, Rect, Rounding, Sense, Stroke, pos2, vec2};
+use eframe::egui::{Align2, Color32, FontId, Key, Modifiers, Rect, Sense, Stroke, pos2, vec2};
 use hxs_core::chain::{self, Layout, Op};
 
 use super::*;
@@ -101,18 +101,6 @@ fn droppable(layout: &Layout, drag: &Drag, position: usize) -> bool {
         Drag::Model { .. } => layout.contains_key(&position) || chain::insert(layout, NEW_BLOCK, None, position).is_some(),
         Drag::Presets(_) => false,
     }
-}
-
-/// A raised tile: shadow, body, a lit top edge and a colored rim.
-fn paint_tile(p: &egui::Painter, r: Rect, rim: Stroke, glow: Option<Color32>) {
-    p.rect_filled(r.translate(vec2(0.0, 3.0)), 10.0, Color32::from_black_alpha(150));
-    if let Some(g) = glow {
-        p.rect_stroke(r.expand(2.0), 12.0, Stroke::new(4.0_f32, g.linear_multiply(0.25)));
-    }
-    p.rect_filled(r, 10.0, theme::TILE);
-    let top = Rect::from_min_max(r.min, pos2(r.right(), r.center().y));
-    p.rect_filled(top, Rounding { nw: 10.0, ne: 10.0, sw: 0.0, se: 0.0 }, Color32::from_white_alpha(8));
-    p.rect_stroke(r, 10.0, rim);
 }
 
 /// A small button drawn as one of our icons.
@@ -511,8 +499,8 @@ impl App {
         let rows_y = [rect.top() + 6.0, rect.top() + 6.0 + TILE + ROW_GAP];
         let center = |row: usize, idx: usize| pos2(x0 + slot_w * (idx as f32 + 0.5), rows_y[row] + TILE / 2.0);
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 12.0, theme::BG);
-        let line = Stroke::new(2.0_f32, theme::LINE);
+        theme::well(&painter, rect, 12.0);
+        let line = Stroke::new(1.6_f32, theme::LINE);
         let parallel = d.blocks.iter().any(|b| ROW_B.contains(&b.position));
         let (in_x, out_x) = (x0 - IO_WIDTH / 2.0 - 6.0, x0 + slot_w * chain::ROW_LEN as f32 + IO_WIDTH / 2.0 + 6.0);
         let (ya, yb) = (center(0, 0).y, center(1, 0).y);
@@ -520,8 +508,10 @@ impl App {
         painter.line_segment([pos2(in_x, ya), pos2(out_x, ya)], line);
         for (x, icon, cell) in [(in_x, "in", hxs_core::preset::CELL_INPUT), (out_x, "out", hxs_core::preset::CELL_OUTPUT)] {
             let r = Rect::from_center_size(pos2(x, ya), vec2(IO_WIDTH, TILE));
-            let rim = if self.ed.selected == Some(cell) { Stroke::new(3.0_f32, theme::SELECTED) } else { Stroke::new(1.0_f32, theme::LINE) };
-            paint_tile(&painter, r, rim, None);
+            if self.ed.selected == Some(cell) {
+                theme::glow(&painter, r, 9.0, theme::SELECTED, 1.0);
+            }
+            theme::plate(&painter, r, 9.0, Color32::from_gray(54));
             icons::ui(&painter, r.shrink(6.0), icon, theme::TEXT);
             if ui.interact(r, ui.id().with(("io", cell)), Sense::click()).on_hover_text(if cell == 0 { "Input: noise gate" } else { "Output: pan and level" }).clicked() {
                 acts.push(Act::Select(cell));
@@ -546,13 +536,10 @@ impl App {
                     Some(b) => {
                         let category = category_of(c, b.preset_id);
                         let base = theme::category_color(&category);
-                        let color = if b.enabled { base } else { base.linear_multiply(0.35) };
-                        let rim = match (selected || hovering_drop, b.enabled) {
-                            (true, _) => Stroke::new(3.0_f32, theme::SELECTED),
-                            (false, _) => Stroke::new(2.0_f32, color),
-                        };
-                        paint_tile(&painter, tile, rim, b.enabled.then_some(base));
-                        icons::category(&painter, tile, &category, color);
+                        if selected || hovering_drop {
+                            theme::glow(&painter, tile.shrink(3.0), 10.0, theme::SELECTED, 1.2);
+                        }
+                        icons::miniature(&painter, tile, &category, base, b.enabled);
                         let name: String = model_name(c, style, b.preset_id).chars().take(16).collect();
                         painter.text(pos2(tile.center().x, tile.bottom() + 4.0), Align2::CENTER_TOP, name, FontId::proportional(11.0), if b.enabled { theme::TEXT } else { theme::MUTED });
                         r.dnd_set_drag_payload(Drag::Block(position));
@@ -658,8 +645,8 @@ impl App {
         };
         let model = catalog.and_then(|c| c.model(b.preset_id));
         let category = category_of(catalog, b.preset_id);
-        let shadow = egui::epaint::Shadow { offset: vec2(0.0, 4.0), blur: 14.0, spread: 0.0, color: Color32::from_black_alpha(140) };
-        egui::Frame::none().fill(theme::TILE).rounding(12.0).inner_margin(12.0).shadow(shadow).stroke(Stroke::new(1.0_f32, Color32::from_gray(48))).show(ui, |ui| {
+        let shadow = egui::epaint::Shadow { offset: vec2(0.0, 4.0), blur: 18.0, spread: 0.0, color: Color32::from_black_alpha(70) };
+        egui::Frame::none().fill(theme::TILE).rounding(12.0).inner_margin(12.0).shadow(shadow).stroke(Stroke::new(1.0_f32, theme::EDGE)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
                 icons::category(ui.painter(), r, &category, theme::category_color(&category));
@@ -703,8 +690,8 @@ impl App {
             },
         };
         let model = catalog.and_then(|c| c.model(model_id));
-        let shadow = egui::epaint::Shadow { offset: vec2(0.0, 4.0), blur: 14.0, spread: 0.0, color: Color32::from_black_alpha(140) };
-        egui::Frame::none().fill(theme::TILE).rounding(12.0).inner_margin(12.0).shadow(shadow).stroke(Stroke::new(1.0_f32, Color32::from_gray(48))).show(ui, |ui| {
+        let shadow = egui::epaint::Shadow { offset: vec2(0.0, 4.0), blur: 18.0, spread: 0.0, color: Color32::from_black_alpha(70) };
+        egui::Frame::none().fill(theme::TILE).rounding(12.0).inner_margin(12.0).shadow(shadow).stroke(Stroke::new(1.0_f32, theme::EDGE)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
                 let icon = if cell == CELL_OUTPUT { "out" } else { "in" };
