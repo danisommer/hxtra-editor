@@ -613,7 +613,9 @@ impl App {
                             false => name,
                         };
                         let data = c.ir_bytes();
-                        let info = stomp::new_ir_info(slot, &name, &data)?;
+                        stomp::new_ir_info(slot, &name, 0)?;
+                        let id = s.ir_id_for(&data)?;
+                        let info = stomp::new_ir_info(slot, &name, id)?;
                         s.batch_begin()?;
                         let written = s.upload_ir(slot, &info, &data);
                         let ended = s.batch_end();

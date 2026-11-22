@@ -543,12 +543,14 @@ fn upload_capture(timeout: Duration, file: &Path, number: u64, name: Option<&str
     let c = hxs_core::nam::convert(&text).with_context(|| format!("converting {}", file.display()))?;
     let name = name.map(str::to_owned).or_else(|| c.name.clone()).context("the capture has no name: pass --name")?;
     let data = c.ir_bytes();
-    let info = hxs_core::stomp::new_ir_info(slot, &name, &data)?;
+    hxs_core::stomp::new_ir_info(slot, &name, 0)?;
     let mut stomp = connect(timeout)?;
     if let Some(taken) = stomp.ir_list()?.into_iter().find(|i| i.index == slot) {
         anyhow::bail!("IR {number:03} holds \"{}\"; empty it first (delete-ir {number}) or pick another slot", taken.name);
     }
-    println!("IR {number:03} (empty) <- \"{name}\" ({} bytes, sha256 {})", data.len(), backup::sha256_hex(&data));
+    let id = stomp.ir_id_for(&data)?;
+    let info = hxs_core::stomp::new_ir_info(slot, &name, id)?;
+    println!("IR {number:03} (empty) <- \"{name}\" ({} bytes, sha256 {}, id {id:#010x})", data.len(), backup::sha256_hex(&data));
     if !yes {
         println!("dry run: nothing written (add --yes to write the slot)");
         return Ok(());

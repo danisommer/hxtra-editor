@@ -308,6 +308,20 @@ impl Stomp {
         self.session.request(self.librarian, librarian_cmd::IR_INFO, int_map(&[(key::IR_INDEX, Value::from(index))]))
     }
 
+    /// The `0x71` id for `data`: the one of a slot already holding the same data (as HX Edit
+    /// would compute it), else [`fallback_ir_id`].
+    pub fn ir_id_for(&mut self, data: &[u8]) -> Result<u32> {
+        for ir in self.ir_list()? {
+            if self.ir_data(ir.index)? == data {
+                let info = self.ir_info(ir.index)?;
+                if let Some(id) = msg::get(&info, IR_ID).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()) {
+                    return Ok(id);
+                }
+            }
+        }
+        Ok(fallback_ir_id(data))
+    }
+
     pub fn ir_data(&mut self, index: u64) -> Result<Vec<u8>> {
         let params = int_map(&[(key::IR_INDEX, Value::from(index)), (key::FORMAT, Value::from(LIBRARIAN_FORMAT))]);
         let r = self.session.request(self.librarian, librarian_cmd::IR_DATA, params)?;
@@ -416,20 +430,26 @@ fn upload_params(setlist: u64, slot: usize, name: &str, flags: ListFlags, file: 
 
 pub const MAX_IR_NAME: usize = 64;
 
-/// The info map of a new User IR, with the fields HX Edit sends on an import (capture 12):
-/// `0x72: 1`, `0x73: 3`, flags off. `0x71` is a u32 whose meaning is not known (not a CRC32,
-/// Adler-32, FNV or Murmur hash of the data or of the .wav); it gets the first 4 bytes of the
-/// data's SHA-256.
-pub fn new_ir_info(slot: u64, name: &str, data: &[u8]) -> Result<Value> {
+const IR_ID: u64 = 0x71;
+
+/// The `0x71` id for IR data without a slot that holds it: the first 4 bytes of its SHA-256.
+/// HX Edit's own value comes from the content (the same data gets the same id under any name),
+/// but its formula is not known.
+pub fn fallback_ir_id(data: &[u8]) -> u32 {
+    let digest = Sha256::digest(data);
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])
+}
+
+/// The info map of a new User IR, with the fields HX Edit sends on an import (captures 12, 17):
+/// `0x72: 1`, `0x73: 3`, flags off, and `id` as `0x71`.
+pub fn new_ir_info(slot: u64, name: &str, id: u32) -> Result<Value> {
     match (name.is_empty(), name.len() <= MAX_IR_NAME, name.bytes().all(|b| (0x20..0x7f).contains(&b))) {
         (false, true, true) => {}
         _ => return Err(Error::Backup(format!("an IR name is 1 to {MAX_IR_NAME} printable ASCII characters, not {name:?}"))),
     }
-    let digest = Sha256::digest(data);
-    let id = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
     Ok(int_map(&[
         (key::IR_INDEX, Value::from(slot)),
-        (0x71, Value::from(id)),
+        (IR_ID, Value::from(id)),
         (key::NAME, Value::from(format!("{name}\0"))),
         (0x72, Value::from(1)),
         (0x73, Value::from(3)),
@@ -586,11 +606,16 @@ mod tests {
 
     #[test]
     fn new_ir_info_has_hx_edits_fields_in_its_order() {
-        let info = new_ir_info(2, "VOX AC30 NAM", &[0; 8]).unwrap();
+        let info = new_ir_info(2, "VOX AC30 hxs test", 0xcdc5_5712).unwrap();
         let keys: Vec<u64> = info.as_map().unwrap().iter().filter_map(|(k, _)| k.as_u64()).collect();
         assert_eq!(keys, vec![0x70, 0x71, 0x6d, 0x72, 0x73, 0x7b, 0x7c, 0x7d]);
-        assert_eq!(msg::get(&info, 0x6d).and_then(Value::as_str), Some("VOX AC30 NAM\0"));
-        assert!(new_ir_info(2, "", &[]).is_err() && new_ir_info(2, "ação", &[]).is_err());
+        assert_eq!(msg::get(&info, 0x6d).and_then(Value::as_str), Some("VOX AC30 hxs test\0"));
+        assert!(new_ir_info(2, "", 0).is_err() && new_ir_info(2, "ação", 0).is_err());
+        let data = vec![0x5a; 8192];
+        let sent = ir_upload_params(2, &info, &data).unwrap();
+        let hx_edit = "89 70 02 71 ce cd c5 57 12 6d b2 56 4f 58 20 41 43 33 30 20 68 78 73 20 74 65 73 74 00 72 01 73 03 7b c2 7c c2 7d 00 6e da 20 00";
+        let head: Vec<String> = sent[..43].iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(head.join(" "), hx_edit, "the params HX Edit sent for this import (capture 17), up to the data");
     }
 
     #[test]
