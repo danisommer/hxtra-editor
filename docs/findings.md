@@ -249,6 +249,7 @@ Ações feitas no aparelho com pausas de cerca de 20 s, sem salvar. Depois delas
 - [fato] A configuração 113 **não** mudou depois de salvar o "Empty" sem mudanças, nem depois de subir o "SAVE TEST" (cópia do 010) para o slot atual. Mudou de int `0` para float `1.0` logo depois de subir o "Empty" para o slot atual, quando o aparelho o recarregou.
 - [hipótese refutada] "Carregar um preset com modelo de Variax (seção 5, chave 45 = `15` nos 115 "Empty", `0` nos 11 AC30) regrava a 113": com a 113 restaurada como int `0`, `select 12` ("Empty") e depois `select 0` (AC30) não a mudaram.
 - [fato] Nas três vezes em que a 113 virou float `1.0`, o último passo antes da verificação foi **subir o arquivo "Empty" (librarian `0x08`) para o slot carregado**, que o aparelho recarrega em seguida. Subir o "SAVE TEST" para o slot carregado não a mudou, e carregar o "Empty" pelo `0x14` também não.
+- [fato, 2026-11-22] Quarta ocorrência: `hxs restore-preset` do "Empty" (2234 bytes) para o 010, que era o preset atual; logo depois a 113 estava em float `1.0` (antes int `0`). O padrão continua o mesmo: subir esse arquivo para o slot carregado.
 - [hipótese] A recarga depois de um upload aplica configurações do preset (o Variax?) que uma carga comum não aplica. Teste possível: subir o "Empty" para um slot que **não** é o atual e depois carregá-lo; e subir para o slot atual um preset com a chave 45 = 0.
 
 ## Blocos do preset contra o catálogo (2026-11-21, os 126 presets do backup `session2`, 84 blocos)
