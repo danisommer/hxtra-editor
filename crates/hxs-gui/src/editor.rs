@@ -141,7 +141,12 @@ enum Act {
     Remove(usize),
     Copy,
     Paste,
+    MoveJunction(bool, u64),
 }
+
+/// The column boundaries the split and the join sit on: 1 before the first column, 9 after
+/// the last.
+const BOUNDARIES: std::ops::RangeInclusive<u64> = 1..=9;
 
 impl App {
     pub(crate) fn screen_bar(&mut self, ui: &mut egui::Ui) {
@@ -366,8 +371,14 @@ impl App {
             if icon_button(ui, "refresh", "Read the edit buffer again (briefly interrupts the sound in snapshots 4-6)").clicked() {
                 self.start_job("reading the edit buffer", |s| Ok(JobResult::EditBuffer(s.edit_buffer()?)));
             }
-            if icon_button(ui, "footswitch", "Footswitch labels and colors").clicked() {
+            if icon_button(ui, "footswitch", "Footswitches: what each one does, its label and color").clicked() {
                 self.ed.footswitch_window = true;
+                if let Some(d) = &self.device {
+                    for (k, fs) in d.footswitches.iter().take(FOOTSWITCHES as usize).enumerate() {
+                        self.footswitch_labels[k] = fs.label.clone();
+                        self.footswitch_colors[k] = fs.color.unwrap_or(0);
+                    }
+                }
             }
         });
         if save {
@@ -503,17 +514,47 @@ impl App {
         let line = Stroke::new(2.0_f32, theme::LINE);
         let parallel = d.blocks.iter().any(|b| ROW_B.contains(&b.position));
         let (in_x, out_x) = (x0 - IO_WIDTH / 2.0 - 6.0, x0 + slot_w * chain::ROW_LEN as f32 + IO_WIDTH / 2.0 + 6.0);
-        painter.line_segment([pos2(in_x, center(0, 0).y), pos2(out_x, center(0, 0).y)], line);
-        if parallel {
-            let (split_x, join_x) = (x0 - 4.0, x0 + slot_w * chain::ROW_LEN as f32 + 4.0);
-            painter.line_segment([pos2(split_x, center(0, 0).y), pos2(split_x, center(1, 0).y)], line);
-            painter.line_segment([pos2(split_x, center(1, 0).y), pos2(join_x, center(1, 0).y)], line);
-            painter.line_segment([pos2(join_x, center(1, 0).y), pos2(join_x, center(0, 0).y)], line);
-        }
-        for (x, icon) in [(in_x, "in"), (out_x, "out")] {
-            let r = Rect::from_center_size(pos2(x, center(0, 0).y), vec2(IO_WIDTH, TILE));
-            paint_tile(&painter, r, Stroke::new(1.0_f32, theme::LINE), None);
+        let (ya, yb) = (center(0, 0).y, center(1, 0).y);
+        let boundary_x = |k: u64| x0 + slot_w * (k as f32 - 1.0);
+        painter.line_segment([pos2(in_x, ya), pos2(out_x, ya)], line);
+        for (x, icon, cell) in [(in_x, "in", hxs_core::preset::CELL_INPUT), (out_x, "out", hxs_core::preset::CELL_OUTPUT)] {
+            let r = Rect::from_center_size(pos2(x, ya), vec2(IO_WIDTH, TILE));
+            let rim = if self.ed.selected == Some(cell) { Stroke::new(3.0_f32, theme::SELECTED) } else { Stroke::new(1.0_f32, theme::LINE) };
+            paint_tile(&painter, r, rim, None);
             icons::ui(&painter, r.shrink(6.0), icon, theme::TEXT);
+            if ui.interact(r, ui.id().with(("io", cell)), Sense::click()).on_hover_text(if cell == 0 { "Input: noise gate" } else { "Output: pan and level" }).clicked() {
+                acts.push(Act::Select(cell));
+            }
+        }
+        if parallel {
+            let split_k = d.routing.split.as_ref().map_or(1, |s| s.position);
+            let join_k = d.routing.join.as_ref().map_or(9, |j| j.position);
+            for (join, k, cell) in [(false, split_k, hxs_core::preset::CELL_SPLIT), (true, join_k, hxs_core::preset::CELL_JOIN)] {
+                let id = ui.id().with(("junction", join));
+                let dragged_to = ui.ctx().dragged_id().filter(|d| *d == id).and_then(|_| ui.ctx().pointer_interact_pos()).map(|p| {
+                    BOUNDARIES.min_by(|a, b| (boundary_x(*a) - p.x).abs().total_cmp(&(boundary_x(*b) - p.x).abs())).unwrap_or(k)
+                });
+                let shown = dragged_to.unwrap_or(k);
+                let x = boundary_x(shown) - if join { -4.0 } else { 4.0 };
+                painter.line_segment([pos2(x, ya), pos2(x, yb)], line);
+                let dot = Rect::from_center_size(pos2(x, ya), vec2(18.0, 18.0));
+                let r = ui.interact(dot, id, Sense::click_and_drag());
+                let selected = self.ed.selected == Some(cell);
+                painter.circle_filled(dot.center() + vec2(0.0, 2.0), 7.0, Color32::from_black_alpha(140));
+                painter.circle_filled(dot.center(), 7.0, if selected || r.hovered() || dragged_to.is_some() { theme::SELECTED } else { theme::LINE });
+                painter.circle_filled(dot.center() - vec2(2.0, 2.0), 2.5, Color32::from_white_alpha(60));
+                let tip = if join { "Join: drag to move where the paths meet; click for its mix" } else { "Split: drag to move where the paths part; click for its settings" };
+                if r.on_hover_text(tip).clicked() {
+                    acts.push(Act::Select(cell));
+                }
+                if let (true, Some(to)) = (ui.input(|i| i.pointer.any_released()), dragged_to) {
+                    let valid = if join { to > split_k } else { to < join_k };
+                    if to != k && valid {
+                        acts.push(Act::MoveJunction(join, to));
+                    }
+                }
+            }
+            painter.line_segment([pos2(boundary_x(split_k) - 4.0, yb), pos2(boundary_x(join_k) + 4.0, yb)], line);
         }
         for row in 0..2 {
             for idx in 0..chain::ROW_LEN {
@@ -593,6 +634,9 @@ impl App {
             ui.weak("Select a block to edit it; drag models from the list on the left onto the chain.");
             return acts;
         };
+        if [hxs_core::preset::CELL_INPUT, hxs_core::preset::CELL_OUTPUT, hxs_core::preset::CELL_SPLIT, hxs_core::preset::CELL_JOIN].contains(&position) {
+            return self.routing_panel(ui, position);
+        }
         let Some(d) = self.device.as_mut() else { return acts };
         let Some(b) = d.blocks.iter_mut().find(|b| b.position == position) else {
             ui.weak(format!("{} is empty: click it to add a block, or drop one there.", position_name(position)));
@@ -619,30 +663,46 @@ impl App {
                 });
             });
             ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                for i in 0..b.params.len() {
-                    let p = model.and_then(|m| m.param(i));
-                    if p.is_some_and(|p| !(p.visible || hidden)) {
-                        continue;
-                    }
-                    ui.allocate_ui(CELL, |ui| {
-                        ui.vertical_centered(|ui| {
-                            let title = p.map_or(format!("[{i}]"), |p| p.title.to_uppercase());
-                            let t = ui.add(egui::Label::new(egui::RichText::new(title).small().strong()).sense(Sense::click()));
-                            t.on_hover_text("Right-click: controller").context_menu(|ui| controller_menu(ui, position, i, &b.params[i], &mut acts));
-                            let id = ui.id().with(("param", position, i));
-                            let old = b.params[i].clone();
-                            let touch = param_control(ui, id, p, &mut b.params[i], irs);
-                            if touch.changed {
-                                acts.push(Act::Param { position, index: i, value: b.params[i].clone(), old, began: touch.began });
-                            }
-                            if p.and_then(|p| p.hxtra_added).unwrap_or(false) {
-                                ui.weak("HXtra");
-                            }
-                        });
-                    });
+            param_grid(ui, position, model, &mut b.params, hidden, irs, true, &mut acts);
+        });
+        acts
+    }
+
+    /// The panel of the input, the output, the split or the join.
+    fn routing_panel(&mut self, ui: &mut egui::Ui, cell: usize) -> Vec<Act> {
+        use hxs_core::preset::{CELL_INPUT, CELL_OUTPUT, CELL_SPLIT, INPUT_MODEL, OUTPUT_MODEL};
+        let mut acts = Vec::new();
+        let (style, hidden) = (self.style, self.show_hidden);
+        let catalog = self.catalog.as_ref().filter(|_| !self.catalog_ignored);
+        let irs = &self.irs;
+        let Some(d) = self.device.as_mut() else { return acts };
+        let (title, model_id, values): (&str, u64, &mut Vec<Value>) = match cell {
+            CELL_INPUT => ("Input", INPUT_MODEL, &mut d.routing.input),
+            CELL_OUTPUT => ("Output", OUTPUT_MODEL, &mut d.routing.output),
+            CELL_SPLIT => match d.routing.split.as_mut() {
+                Some(j) => ("Split", j.model, &mut j.params),
+                None => return acts,
+            },
+            _ => match d.routing.join.as_mut() {
+                Some(j) => ("Join", j.model, &mut j.params),
+                None => return acts,
+            },
+        };
+        let model = catalog.and_then(|c| c.model(model_id));
+        let shadow = egui::epaint::Shadow { offset: vec2(0.0, 4.0), blur: 14.0, spread: 0.0, color: Color32::from_black_alpha(140) };
+        egui::Frame::none().fill(theme::TILE).rounding(12.0).inner_margin(12.0).shadow(shadow).stroke(Stroke::new(1.0_f32, Color32::from_gray(48))).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
+                let icon = if cell == CELL_OUTPUT { "out" } else { "in" };
+                icons::ui(ui.painter(), r, icon, theme::TEXT);
+                ui.weak(title);
+                ui.heading(model.map_or(format!("model {model_id}"), |m| m.display_name(style).to_owned()));
+                if cell == CELL_SPLIT {
+                    ui.weak("(changing the split type is not known yet)");
                 }
             });
+            ui.separator();
+            param_grid(ui, cell, model, values, hidden, irs, false, &mut acts);
         });
         acts
     }
@@ -670,8 +730,9 @@ impl App {
                 }
                 self.mark_edited();
             }
+            Act::MoveJunction(join, to) => self.edit_job(if join { "moving the join" } else { "moving the split" }, move |s| s.move_junction(join, to)),
             Act::Param { position, index, value, old, began } => {
-                if began {
+                if began && blocks.iter().any(|b| b.position == position) {
                     let mut before = blocks;
                     if let Some(v) = before.iter_mut().find(|b| b.position == position).and_then(|b| b.params.get_mut(index)) {
                         *v = old;
@@ -956,10 +1017,25 @@ impl App {
         }
         let mut open = true;
         let mut job = None;
-        egui::Window::new("Footswitch labels and colors").open(&mut open).collapsible(false).show(ctx, |ui| {
-            egui::Grid::new("footswitches").show(ui, |ui| {
+        let style = self.style;
+        let catalog = self.catalog.as_ref().filter(|_| !self.catalog_ignored);
+        let current: Vec<hxs_core::preset::Footswitch> = self.device.as_ref().map(|d| d.footswitches.clone()).unwrap_or_default();
+        let blocks: Vec<Block> = self.device.as_ref().map(|d| d.blocks.clone()).unwrap_or_default();
+        let describe = |a: &hxs_core::preset::FootswitchAssignment| {
+            let block = blocks.iter().find(|b| b.position as u64 == a.block);
+            let name = block.map_or(format!("block {}", position_name(a.block as usize)), |b| format!("{} {}", position_name(b.position), model_name(catalog, style, b.preset_id)));
+            match a.parameter {
+                None => format!("on/off of {name}"),
+                Some(_) => format!("{} of {name}", a.label),
+            }
+        };
+        egui::Window::new("Footswitches").open(&mut open).collapsible(false).show(ctx, |ui| {
+            ui.weak("What each footswitch does in this preset (assign more from a block's menu or a parameter's right-click).");
+            egui::Grid::new("footswitches").striped(true).show(ui, |ui| {
                 for fs in 0..FOOTSWITCHES as usize {
-                    ui.label(format!("FS{}", fs + 1));
+                    ui.strong(format!("FS{}", fs + 1));
+                    let doing: Vec<String> = current.get(fs).map(|f| f.assignments.iter().map(describe).collect()).unwrap_or_default();
+                    ui.label(if doing.is_empty() { "nothing".to_owned() } else { doing.join(", ") });
                     ui.add(egui::TextEdit::singleline(&mut self.footswitch_labels[fs]).desired_width(140.0).char_limit(stomp::MAX_PRESET_NAME));
                     if ui.button("Set label").clicked() {
                         job = Some((fs as u64, Some(self.footswitch_labels[fs].clone()), None));
@@ -1080,6 +1156,37 @@ fn model_browser(ui: &mut egui::Ui, c: &Catalog, style: NameStyle, search: &str,
     }
     let _ = salt;
     clicked
+}
+
+/// The grid of a panel's parameters; `controllers` offers the controller menu on each name.
+#[allow(clippy::too_many_arguments)]
+fn param_grid(ui: &mut egui::Ui, position: usize, model: Option<&Model>, values: &mut [Value], hidden: bool, irs: &[IrSlot], controllers: bool, acts: &mut Vec<Act>) {
+    ui.horizontal_wrapped(|ui| {
+        for (i, value) in values.iter_mut().enumerate() {
+            let p = model.and_then(|m| m.param(i));
+            if p.is_some_and(|p| !(p.visible || hidden)) {
+                continue;
+            }
+            ui.allocate_ui(CELL, |ui| {
+                ui.vertical_centered(|ui| {
+                    let title = p.map_or(format!("[{i}]"), |p| p.title.to_uppercase());
+                    let t = ui.add(egui::Label::new(egui::RichText::new(title).small().strong()).sense(Sense::click()));
+                    if controllers {
+                        t.on_hover_text("Right-click: controller").context_menu(|ui| controller_menu(ui, position, i, value, acts));
+                    }
+                    let id = ui.id().with(("param", position, i));
+                    let old = value.clone();
+                    let touch = param_control(ui, id, p, value, irs);
+                    if touch.changed {
+                        acts.push(Act::Param { position, index: i, value: value.clone(), old, began: touch.began });
+                    }
+                    if p.and_then(|p| p.hxtra_added).unwrap_or(false) {
+                        ui.weak("HXtra");
+                    }
+                });
+            });
+        }
+    });
 }
 
 /// One parameter's control in the block panel.
@@ -1291,8 +1398,9 @@ fn block_menu(ui: &mut egui::Ui, b: &Block, c: Option<&Catalog>, model: Option<&
 fn controller_menu(ui: &mut egui::Ui, position: usize, index: usize, value: &Value, acts: &mut Vec<Act>) {
     for (label, source) in [
         ("Assign to EXP 1", stomp::ControllerSource::Exp1),
-        ("Assign to FS4", stomp::ControllerSource::Fs4),
-        ("Assign to FS5", stomp::ControllerSource::Fs5),
+        ("Assign to FS1", stomp::ControllerSource::Footswitch(0)),
+        ("Assign to FS2", stomp::ControllerSource::Footswitch(1)),
+        ("Assign to FS3", stomp::ControllerSource::Footswitch(2)),
         ("Remove controller", stomp::ControllerSource::None),
     ] {
         if ui.button(label).clicked() {

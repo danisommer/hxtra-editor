@@ -329,6 +329,21 @@ Tudo [fato] da captura, salvo quando marcado.
 - [inferência] Fonte de controller 4 = FS4 e 5 = FS5 (a 5 é fato; a 4 é a outra atribuição a footswitch vista). FS1–FS3 continuam sem número conhecido.
 - [em aberto] A paleta das cores (os números 0..15 e o que cada um é).
 
+## Divisão, junção, In, Out e footswitches pelo HX Edit (2026-11-22, captura `25`, preset 010)
+
+| Ação | Comando |
+|---|---|
+| Mover a divisão / a junção | `0x2e` / `0x2f` `{0x62: fronteira de coluna 1..9}`; notify `0x1a` `{53: divisão, 54: junção}` |
+| Parâmetros da divisão, da junção, do In e do Out | `0x1e` com o bloco 10, 19, 0 e 9 |
+| Fonte de entrada / saída do preset | `0x19` configurações 30 e 134 (seção 5 do preset) |
+| Parâmetro em FS1 / FS2 / FS3 | `0x25` fontes **3 / 4 / 5**; o aparelho responde com o footswitch 0 / 1 / 2 |
+| Nome, cor e outros campos do footswitch | `0x3b`, `0x3d`, `0x3a {0x66, 0x41: true}` e `0x7b {endereço do parâmetro, 0x81}` ([em aberto] o que `0x3a` e `0x7b` mudam) |
+
+- [fato] **Correção:** na captura `24` a "fonte 5 = FS5" estava errada; nas duas capturas a fonte 5 veio com o footswitch 2, que é o **FS3**. Fontes: 0 nenhuma, 1 EXP 1, 3..5 FS1..FS3; EXP 2 e FS4/FS5 em aberto.
+- [fato] No arquivo: a célula 10 (divisão) guarda `15: {8: modelo (257 Y, 256 A/B, 258 Crossover, 563 Dynamic), 13: fronteira, 7: valores}` e `18: ativa`; a célula 19 (junção) `17: {8: 151 Mixer, 13: fronteira, 7: 6 valores}`; o In (célula 0) os valores do modelo 516 (gate, threshold, decay); o Out (célula 9) os do 517 (pan, nível). A seção 3 é a lista FS1..FS5, cada uma com o que controla (`11: {0: 1 bypass / 2 parâmetro, 5: rótulo, 8: bloco, 9: {29: parâmetro}}`), o nome (`14`) e a cor (`16`); a seção 4 é indexada pela fonte do controller.
+- [fato] No passo "tipo de divisão" o HX Edit mandou o preset inteiro (`0x15`); trocar o tipo da divisão continua sem comando próprio conhecido.
+- [fato] Um bloco amp + cab guarda os parâmetros do cab na chave 12 (7 valores).
+
 ## Em aberto
 
 - ~~Qual comando entrega o arquivo do preset~~ → resolvido: librarian `0x04` (acima). [fato] O `0x16` (edit buffer) **não** traz a `0x64`, nem do preset 10, que tem banco B.

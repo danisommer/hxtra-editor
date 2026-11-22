@@ -142,6 +142,8 @@ struct Device {
     /// The names of snapshots 4..6 from the stored preset (the edit buffer read lacks bank B);
     /// empty when the preset has no bank B.
     bank_b_names: Vec<String>,
+    routing: hxs_core::preset::Routing,
+    footswitches: Vec<hxs_core::preset::Footswitch>,
 }
 
 /// The names of the stored preset's snapshots 4..6, or none without a bank B.
@@ -331,6 +333,8 @@ impl App {
             preset_tempo,
             global_bpm,
             bank_b_names: Vec::new(),
+            routing: parsed.as_ref().map(PresetFile::routing).unwrap_or_default(),
+            footswitches: parsed.as_ref().map(PresetFile::footswitches).unwrap_or_default(),
         });
         self.catalog_ignored = false;
         self.check_catalog();
@@ -348,11 +352,13 @@ impl App {
     }
 
     fn load_edit_buffer(&mut self, bytes: Vec<u8>) {
-        let view = PresetFile::parse(bytes).map(|p| preset_view(&p));
+        let view = PresetFile::parse(bytes).map(|p| (preset_view(&p), p.routing(), p.footswitches()));
         match (view, self.device.as_mut()) {
-            (Ok((blocks, names)), Some(d)) => {
+            (Ok(((blocks, names), routing, footswitches)), Some(d)) => {
                 d.blocks = blocks;
                 d.snapshot_names = names;
+                d.routing = routing;
+                d.footswitches = footswitches;
             }
             (Err(e), _) => self.note(format!("could not read the edit buffer: {e}")),
             (_, None) => {}

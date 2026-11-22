@@ -87,6 +87,65 @@ impl Block {
     }
 }
 
+/// The grid cells around the blocks (capture 25): input (cell 0, model 516), output (cell 9,
+/// model 517), the split (cell 10) and the join (cell 19).
+pub const CELL_INPUT: usize = 0;
+pub const CELL_OUTPUT: usize = 9;
+pub const CELL_SPLIT: usize = 10;
+pub const CELL_JOIN: usize = 19;
+pub const INPUT_MODEL: u64 = 516;
+pub const OUTPUT_MODEL: u64 = 517;
+
+/// Where the parallel path starts or ends, and its model's values. `position` is a column
+/// boundary: 1 before the first column, 9 after the last.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Junction {
+    pub model: u64,
+    pub position: u64,
+    pub active: bool,
+    pub params: Vec<Value>,
+}
+
+/// The input, output, split and join of a preset.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Routing {
+    pub input: Vec<Value>,
+    pub output: Vec<Value>,
+    pub split: Option<Junction>,
+    pub join: Option<Junction>,
+}
+
+/// One thing a footswitch does: turn a block on or off, or move one of its parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FootswitchAssignment {
+    pub block: u64,
+    /// `None` for the block's on/off, else the parameter index.
+    pub parameter: Option<u64>,
+    pub label: String,
+}
+
+/// A footswitch of the preset (section 3, FS1..FS5): its label, color and assignments.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Footswitch {
+    pub label: String,
+    pub color: Option<u64>,
+    pub assignments: Vec<FootswitchAssignment>,
+}
+
+fn values_at(v: &Value, key: u64) -> Vec<Value> {
+    msg::get(v, key).and_then(|x| msg::get(x, 4)).and_then(Value::as_array).cloned().unwrap_or_default()
+}
+
+fn junction(body: &Value, key: u64) -> Option<Junction> {
+    let j = msg::get(body, key)?;
+    Some(Junction {
+        model: msg::get(j, 8).and_then(Value::as_u64)?,
+        position: msg::get(j, 13).and_then(Value::as_u64)?,
+        active: msg::get(body, 18).and_then(Value::as_bool).unwrap_or(false),
+        params: values_at(j, 7),
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct Section {
     pub key: u64,
@@ -186,6 +245,46 @@ impl PresetFile {
             .collect()
     }
 
+    /// The input, output, split and join cells (an empty `Routing` when the grid is missing).
+    pub fn routing(&self) -> Routing {
+        let grid = self.section(SECTION_BLOCKS).and_then(|s| msg::get(&s, BLOCK_GRID_KEY).cloned());
+        let cells = grid.as_ref().and_then(Value::as_array).cloned().unwrap_or_default();
+        let body = |i: usize| cells.get(i).and_then(|c| msg::get(c, BLOCK_BODY_KEY)).cloned().unwrap_or(Value::Nil);
+        Routing {
+            input: values_at(&body(CELL_INPUT), 7),
+            output: values_at(&body(CELL_OUTPUT), 7),
+            split: junction(&body(CELL_SPLIT), 15),
+            join: junction(&body(CELL_JOIN), 17),
+        }
+    }
+
+    /// The footswitches FS1..FS5 (section 3, key 8; capture 25).
+    pub fn footswitches(&self) -> Vec<Footswitch> {
+        let list = self.section(3).and_then(|s| msg::get(&s, 8).and_then(Value::as_array).cloned()).unwrap_or_default();
+        list.iter()
+            .map(|fs| {
+                let entries = fs.as_array().cloned().unwrap_or_default();
+                let first = entries.first();
+                Footswitch {
+                    label: first.and_then(|e| msg::get(e, 14)).and_then(msg::text).unwrap_or_default(),
+                    color: first.and_then(|e| msg::get(e, 16)).and_then(Value::as_u64),
+                    assignments: entries
+                        .iter()
+                        .filter_map(|e| {
+                            let target = msg::get(e, 11)?;
+                            let block = msg::get(target, 8).and_then(Value::as_u64)?;
+                            let parameter = match msg::get(target, 0).and_then(Value::as_u64) {
+                                Some(2) => msg::get(target, 9).and_then(|p| msg::get(p, 29)).and_then(Value::as_u64),
+                                _ => None,
+                            };
+                            Some(FootswitchAssignment { block, parameter, label: msg::get(target, 5).and_then(msg::text).unwrap_or_default() })
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
     fn processing_cells(&self) -> Vec<(usize, Value)> {
         let grid = self.section(SECTION_BLOCKS).and_then(|s| msg::get(&s, BLOCK_GRID_KEY).cloned());
         grid.as_ref()
@@ -266,6 +365,35 @@ mod tests {
         assert_eq!((blocks[0].cab, blocks[0].kind), (None, Some(1)), "26 = -1 is no cab");
         assert!(blocks[0].extras.is_empty());
         assert_eq!((blocks[1].preset_id, blocks[1].enabled, blocks[1].extras.clone()), (636, false, vec![Value::from(true)]));
+    }
+
+    #[test]
+    fn reads_routing_and_footswitches_as_capture_25_saved_them() {
+        let values = |v: Vec<Value>| msg::int_map(&[(2, Value::from(v.len() as u64)), (3, Value::from(v.len() as u64)), (4, Value::Array(v))]);
+        let cell = |t: u64, body: Value| msg::int_map(&[(19, Value::from(t)), (20, body)]);
+        let input = cell(0, msg::int_map(&[(5, Value::from(1)), (7, values(vec![Value::from(true), Value::F32(-44.4), Value::F32(0.327)]))]));
+        let output = cell(1, msg::int_map(&[(6, Value::from(1)), (7, values(vec![Value::F32(0.675), Value::F32(-54.7)]))]));
+        let split = cell(2, msg::int_map(&[(15, msg::int_map(&[(8, Value::from(257)), (13, Value::from(5)), (7, values(vec![Value::F32(0.36), Value::F32(0.65), Value::from(false)]))])), (18, Value::from(true))]));
+        let join = cell(3, msg::int_map(&[(17, msg::int_map(&[(8, Value::from(151)), (13, Value::from(7)), (7, values(vec![Value::F32(-38.3)]))])), (18, Value::from(true))]));
+        let empty = cell(8, Value::Nil);
+        let mut cells = vec![empty; 20];
+        (cells[0], cells[9], cells[10], cells[19]) = (input, output, split, join);
+        let bypass = msg::int_map(&[(10, Value::from(0)), (11, msg::int_map(&[(0, Value::from(1)), (5, Value::from("Simple Delay\0")), (8, Value::from(15))])), (14, Value::from("fefewfewfew\0")), (16, Value::from(5))]);
+        let param = msg::int_map(&[(10, Value::from(7)), (11, msg::int_map(&[(0, Value::from(2)), (5, Value::from("Treble\0")), (8, Value::from(4)), (9, msg::int_map(&[(29, Value::from(3))]))])), (14, Value::from("fefewfewfew\0")), (16, Value::from(5))]);
+        let fs = msg::int_map(&[(7, Value::from(0)), (8, Value::Array(vec![Value::Nil, Value::Array(vec![param, bypass]), Value::Nil, Value::Nil, Value::Nil]))]);
+        let p = PresetFile::parse(file(&[(7, meta()), (0, msg::int_map(&[(22, Value::Array(cells))])), (3, fs)])).unwrap();
+        let r = p.routing();
+        assert_eq!((r.input.len(), r.output.len()), (3, 2));
+        assert_eq!(r.split, Some(Junction { model: 257, position: 5, active: true, params: vec![Value::F32(0.36), Value::F32(0.65), Value::from(false)] }));
+        assert_eq!(r.join.map(|j| (j.model, j.position)), Some((151, 7)));
+        let footswitches = p.footswitches();
+        assert_eq!(footswitches[1].label, "fefewfewfew");
+        assert_eq!(footswitches[1].color, Some(5));
+        assert_eq!(footswitches[1].assignments, vec![
+            FootswitchAssignment { block: 4, parameter: Some(3), label: "Treble".into() },
+            FootswitchAssignment { block: 15, parameter: None, label: "Simple Delay".into() },
+        ]);
+        assert!(footswitches[0].assignments.is_empty());
     }
 
     #[test]

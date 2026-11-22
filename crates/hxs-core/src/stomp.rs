@@ -47,19 +47,22 @@ mod editor_cmd {
     pub const CONTROLLER_MAX: u8 = 0x42;
     pub const SNAPSHOT_BYPASS: u8 = 0x66;
     pub const SNAPSHOT_NAME: u8 = 0x59;
+    pub const MOVE_SPLIT: u8 = 0x2e;
+    pub const MOVE_JOIN: u8 = 0x2f;
     pub const SNAPSHOT_COLOR: u8 = 0x62;
     pub const FOOTSWITCH_LABEL: u8 = 0x3b;
     pub const FOOTSWITCH_COLOR: u8 = 0x3d;
 }
 
-/// A controller source as `0x25` names it (captures 23, 24): 0 none, 1 EXP 1, 5 FS5 (fact);
-/// 4 FS4 (inference: the other footswitch assignment seen). FS1..FS3 are not known yet.
+/// A controller source as `0x25` names it (captures 23..25; preset section 4 is indexed by it):
+/// 0 none, 1 EXP 1, 3..5 FS1..FS3 (the unit answers with footswitch 0..2). EXP 2 and FS4/FS5
+/// are not known yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerSource {
     None,
     Exp1,
-    Fs4,
-    Fs5,
+    /// FS1..FS3 as 0..2.
+    Footswitch(u8),
 }
 
 impl ControllerSource {
@@ -67,8 +70,7 @@ impl ControllerSource {
         match self {
             ControllerSource::None => (0, 0),
             ControllerSource::Exp1 => (1, 4),
-            ControllerSource::Fs4 => (4, 4),
-            ControllerSource::Fs5 => (5, 4),
+            ControllerSource::Footswitch(n) => (3 + u64::from(n.min(2)), 4),
         }
     }
 }
@@ -481,6 +483,13 @@ impl Stomp {
     pub fn set_snapshot_bypass(&mut self, block: u64, follows: bool) -> Result<()> {
         let params = int_map(&[(key::BLOCK, Value::from(block)), (key::ENABLED, Value::from(follows))]);
         self.session.request(self.editor, editor_cmd::SNAPSHOT_BYPASS, params).map(drop)
+    }
+
+    /// Move where the parallel path starts (`join: false`) or ends, to a column boundary 1..9
+    /// (editor 0x2e / 0x2f `{0x62}`, capture 25; notify 0x1a).
+    pub fn move_junction(&mut self, join: bool, position: u64) -> Result<()> {
+        let cmd = if join { editor_cmd::MOVE_JOIN } else { editor_cmd::MOVE_SPLIT };
+        self.session.request(self.editor, cmd, int_map(&[(key::BLOCK, Value::from(position))])).map(drop)
     }
 
     /// Rename a snapshot of the live bank (0..2; editor 0x59, capture 24; notify 0x2b).
