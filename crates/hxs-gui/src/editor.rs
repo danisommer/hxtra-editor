@@ -142,6 +142,7 @@ enum Act {
     Copy,
     Paste,
     MoveJunction(bool, u64),
+    BypassMidi(usize, u64),
 }
 
 /// The column boundaries the split and the join sit on: 1 before the first column, 9 after
@@ -526,36 +527,6 @@ impl App {
                 acts.push(Act::Select(cell));
             }
         }
-        if parallel {
-            let split_k = d.routing.split.as_ref().map_or(1, |s| s.position);
-            let join_k = d.routing.join.as_ref().map_or(9, |j| j.position);
-            for (join, k, cell) in [(false, split_k, hxs_core::preset::CELL_SPLIT), (true, join_k, hxs_core::preset::CELL_JOIN)] {
-                let id = ui.id().with(("junction", join));
-                let dragged_to = ui.ctx().dragged_id().filter(|d| *d == id).and_then(|_| ui.ctx().pointer_interact_pos()).map(|p| {
-                    BOUNDARIES.min_by(|a, b| (boundary_x(*a) - p.x).abs().total_cmp(&(boundary_x(*b) - p.x).abs())).unwrap_or(k)
-                });
-                let shown = dragged_to.unwrap_or(k);
-                let x = boundary_x(shown) - if join { -4.0 } else { 4.0 };
-                painter.line_segment([pos2(x, ya), pos2(x, yb)], line);
-                let dot = Rect::from_center_size(pos2(x, ya), vec2(18.0, 18.0));
-                let r = ui.interact(dot, id, Sense::click_and_drag());
-                let selected = self.ed.selected == Some(cell);
-                painter.circle_filled(dot.center() + vec2(0.0, 2.0), 7.0, Color32::from_black_alpha(140));
-                painter.circle_filled(dot.center(), 7.0, if selected || r.hovered() || dragged_to.is_some() { theme::SELECTED } else { theme::LINE });
-                painter.circle_filled(dot.center() - vec2(2.0, 2.0), 2.5, Color32::from_white_alpha(60));
-                let tip = if join { "Join: drag to move where the paths meet; click for its mix" } else { "Split: drag to move where the paths part; click for its settings" };
-                if r.on_hover_text(tip).clicked() {
-                    acts.push(Act::Select(cell));
-                }
-                if let (true, Some(to)) = (ui.input(|i| i.pointer.any_released()), dragged_to) {
-                    let valid = if join { to > split_k } else { to < join_k };
-                    if to != k && valid {
-                        acts.push(Act::MoveJunction(join, to));
-                    }
-                }
-            }
-            painter.line_segment([pos2(boundary_x(split_k) - 4.0, yb), pos2(boundary_x(join_k) + 4.0, yb)], line);
-        }
         for row in 0..2 {
             for idx in 0..chain::ROW_LEN {
                 let position = chain::position(row, idx);
@@ -619,6 +590,49 @@ impl App {
                     painter.rect_filled(tile.expand(2.0), 10.0, Color32::from_black_alpha(170));
                 }
             }
+        }
+        if parallel {
+            let split_k = d.routing.split.as_ref().map_or(1, |s| s.position);
+            let join_k = d.routing.join.as_ref().map_or(9, |j| j.position);
+            let nearest = |x: f32| BOUNDARIES.min_by(|a, b| (boundary_x(*a) - x).abs().total_cmp(&(boundary_x(*b) - x).abs())).unwrap_or(1);
+            let mut shown = [split_k, join_k];
+            for (join, k, cell) in [(false, split_k, hxs_core::preset::CELL_SPLIT), (true, join_k, hxs_core::preset::CELL_JOIN)] {
+                let id = ui.id().with(("junction", join));
+                let r = ui.interact(Rect::from_center_size(pos2(boundary_x(k), ya), vec2(22.0, 22.0)), id, Sense::click_and_drag());
+                let target = match (r.dragged() || r.drag_stopped(), r.interact_pointer_pos().or(ui.ctx().pointer_interact_pos())) {
+                    (true, Some(p)) => Some(nearest(p.x)),
+                    _ => None,
+                };
+                let valid = |to: u64| if join { to > split_k } else { to < join_k };
+                let at = target.filter(|t| valid(*t)).unwrap_or(k);
+                shown[usize::from(join)] = at;
+                if r.drag_stopped() && at != k {
+                    acts.push(Act::MoveJunction(join, at));
+                }
+                let tip = if join { "Join: drag along the chain to move where the paths meet; click for its mix" } else { "Split: drag along the chain to move where the paths part; click for its settings" };
+                if r.on_hover_text(tip).clicked() {
+                    acts.push(Act::Select(cell));
+                }
+                let active = self.ed.selected == Some(cell) || target.is_some();
+                let c = pos2(boundary_x(at), ya);
+                painter.circle_filled(c + vec2(0.0, 1.5), 7.5, Color32::from_black_alpha(110));
+                painter.circle_filled(c, 7.0, if active { theme::SELECTED } else { Color32::from_gray(150) });
+                painter.circle_stroke(c, 7.0, Stroke::new(1.0_f32, Color32::from_gray(40)));
+                painter.circle_filled(c - vec2(1.8, 1.8), 2.2, Color32::from_white_alpha(90));
+            }
+            let (sx, jx) = (boundary_x(shown[0]), boundary_x(shown[1]));
+            let radius = 10.0;
+            let path_b = vec![
+                pos2(sx, ya + 8.0),
+                pos2(sx, yb - radius),
+                pos2(sx + radius * 0.3, yb - radius * 0.3),
+                pos2(sx + radius, yb),
+                pos2(jx - radius, yb),
+                pos2(jx - radius * 0.3, yb - radius * 0.3),
+                pos2(jx, yb - radius),
+                pos2(jx, ya + 8.0),
+            ];
+            painter.add(egui::Shape::line(path_b, line));
         }
         self.show_hidden = hidden;
         acts
@@ -730,6 +744,7 @@ impl App {
                 }
                 self.mark_edited();
             }
+            Act::BypassMidi(p, cc) => self.edit_job("assigning the virtual footswitch", move |s| s.assign_bypass_midi(p as u64, cc)),
             Act::MoveJunction(join, to) => self.edit_job(if join { "moving the join" } else { "moving the split" }, move |s| s.move_junction(join, to)),
             Act::Param { position, index, value, old, began } => {
                 if began && blocks.iter().any(|b| b.position == position) {
@@ -1377,6 +1392,13 @@ fn block_menu(ui: &mut egui::Ui, b: &Block, c: Option<&Catalog>, model: Option<&
                 ui.close_menu();
             }
         }
+        ui.separator();
+        for (k, cc) in stomp::VIRTUAL_FOOTSWITCH_CC.enumerate() {
+            if ui.button(format!("FS{} (HXtra virtual, MIDI CC {cc})", 6 + k)).clicked() {
+                acts.push(Act::BypassMidi(p, cc));
+                ui.close_menu();
+            }
+        }
     });
     if ui.button("Ignore snapshots").on_hover_text("Snapshots stop turning this block on or off").clicked() {
         acts.push(Act::FollowSnapshots(p, false));
@@ -1398,9 +1420,12 @@ fn block_menu(ui: &mut egui::Ui, b: &Block, c: Option<&Catalog>, model: Option<&
 fn controller_menu(ui: &mut egui::Ui, position: usize, index: usize, value: &Value, acts: &mut Vec<Act>) {
     for (label, source) in [
         ("Assign to EXP 1", stomp::ControllerSource::Exp1),
+        ("Assign to EXP 2", stomp::ControllerSource::Exp2),
         ("Assign to FS1", stomp::ControllerSource::Footswitch(0)),
         ("Assign to FS2", stomp::ControllerSource::Footswitch(1)),
         ("Assign to FS3", stomp::ControllerSource::Footswitch(2)),
+        ("Assign to FS4", stomp::ControllerSource::Footswitch(3)),
+        ("Assign to FS5", stomp::ControllerSource::Footswitch(4)),
         ("Remove controller", stomp::ControllerSource::None),
     ] {
         if ui.button(label).clicked() {

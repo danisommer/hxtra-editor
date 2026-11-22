@@ -54,14 +54,14 @@ mod editor_cmd {
     pub const FOOTSWITCH_COLOR: u8 = 0x3d;
 }
 
-/// A controller source as `0x25` names it (captures 23..25; preset section 4 is indexed by it):
-/// 0 none, 1 EXP 1, 3..5 FS1..FS3 (the unit answers with footswitch 0..2). EXP 2 and FS4/FS5
-/// are not known yet.
+/// A controller source as `0x25` names it (captures 23..26; preset section 4 is indexed by it):
+/// 0 none, 1 EXP 1, 2 EXP 2, 3..7 FS1..FS5 (the unit answers with footswitch 0..4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerSource {
     None,
     Exp1,
-    /// FS1..FS3 as 0..2.
+    Exp2,
+    /// FS1..FS5 as 0..4.
     Footswitch(u8),
 }
 
@@ -70,10 +70,14 @@ impl ControllerSource {
         match self {
             ControllerSource::None => (0, 0),
             ControllerSource::Exp1 => (1, 4),
-            ControllerSource::Footswitch(n) => (3 + u64::from(n.min(2)), 4),
+            ControllerSource::Exp2 => (2, 4),
+            ControllerSource::Footswitch(n) => (3 + u64::from(n.min(4)), 4),
         }
     }
 }
+
+/// HXtra's virtual footswitches FS6..FS10 are MIDI CC 20..24 (HXtra long-press.md).
+pub const VIRTUAL_FOOTSWITCH_CC: std::ops::RangeInclusive<u64> = 20..=24;
 
 pub const MAX_SNAPSHOT_NAME: usize = 10;
 
@@ -461,6 +465,20 @@ impl Stomp {
         self.session.request(self.editor, editor_cmd::ASSIGN_BYPASS, params).map(drop)
     }
 
+    /// Put a block's on/off on MIDI CC `cc` (editor 0x25 on the bypass address `{0x5f: 5,
+    /// 0x60: 300}`, source 0 and the CC number in 0x47; capture 26, where the unit reports
+    /// source 8). CC 20..24 are HXtra's FS6..FS10.
+    pub fn assign_bypass_midi(&mut self, block: u64, cc: u64) -> Result<()> {
+        let params = int_map(&[
+            (key::BLOCK, Value::from(block)),
+            (BYPASS_PATH, Value::from(5)),
+            (BYPASS_PARAMETER, Value::from(300)),
+            (CONTROLLER_SOURCE, Value::from(0)),
+            (CONTROLLER_KIND, Value::from(cc)),
+        ]);
+        self.session.request(self.editor, editor_cmd::ASSIGN_CONTROLLER, params).map(drop)
+    }
+
     /// Give a parameter a controller, or take it away (editor 0x25, capture 23).
     pub fn assign_controller(&mut self, block: u64, index: u64, source: ControllerSource) -> Result<()> {
         let (source, kind) = source.code();
@@ -683,6 +701,8 @@ fn check_label(label: &str, max: usize) -> Result<()> {
 const CONTROLLER_SOURCE: u64 = 0x4a;
 const CONTROLLER_KIND: u64 = 0x47;
 const CONTROLLER_FLAG: u64 = 0x81;
+const BYPASS_PATH: u64 = 0x5f;
+const BYPASS_PARAMETER: u64 = 0x60;
 
 /// `{0x62: block, 0x1d: true, 0x1a: 0, 0x1c: index}`: a parameter of a block's model.
 fn parameter_address(block: u64, index: u64) -> Vec<(u64, Value)> {
@@ -911,6 +931,11 @@ mod tests {
         assert_eq!(int_map(&exp).to_string(), "{98: 14, 29: true, 26: 0, 28: 2, 74: 1, 71: 4, 129: false}", "capture 23 at 66.676");
         let (none, none_kind) = ControllerSource::None.code();
         assert_eq!((none, none_kind), (0, 0), "capture 23 at 77.660");
+        assert_eq!(ControllerSource::Exp2.code(), (2, 4), "capture 26 at 127.988");
+        assert_eq!(ControllerSource::Footswitch(3).code(), (6, 4), "capture 26 at 142.831: FS4");
+        assert_eq!(ControllerSource::Footswitch(4).code(), (7, 4), "capture 26 at 156.129: FS5");
+        let midi = int_map(&[(key::BLOCK, Value::from(15)), (BYPASS_PATH, Value::from(5)), (BYPASS_PARAMETER, Value::from(300)), (CONTROLLER_SOURCE, Value::from(0)), (CONTROLLER_KIND, Value::from(20))]);
+        assert_eq!(midi.to_string(), "{98: 15, 95: 5, 96: 300, 74: 0, 71: 20}", "capture 26 at 115.053");
     }
 
     #[test]
