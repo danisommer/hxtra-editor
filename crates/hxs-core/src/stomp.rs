@@ -432,6 +432,19 @@ pub const MAX_IR_NAME: usize = 64;
 
 const IR_ID: u64 = 0x71;
 
+/// Import a new IR the way HX Edit does (captures 12, 17): inside a librarian batch, the upload
+/// (`0x09`, which completes on the notify channel), then the IR list, then the end of the batch.
+/// Returns that list. The slot's data is not read back here: right after a new IR's transfer the
+/// unit answers `0x0b` with a negative size (capture 19) while it is still storing it.
+pub fn upload_new_ir(stomp: &mut Stomp, slot: u64, info: &Value, data: &[u8]) -> Result<Vec<IndexedEntry>> {
+    stomp.batch_begin()?;
+    let listed = stomp.upload_ir(slot, info, data).and_then(|()| stomp.ir_list());
+    let ended = stomp.batch_end();
+    let listed = listed?;
+    ended?;
+    Ok(listed)
+}
+
 /// The `0x71` id for IR data without a slot that holds it: the first 4 bytes of its SHA-256.
 /// HX Edit's own value comes from the content (the same data gets the same id under any name),
 /// but its formula is not known.

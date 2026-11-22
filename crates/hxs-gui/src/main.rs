@@ -616,16 +616,9 @@ impl App {
                         stomp::new_ir_info(slot, &name, 0)?;
                         let id = s.ir_id_for(&data)?;
                         let info = stomp::new_ir_info(slot, &name, id)?;
-                        s.batch_begin()?;
-                        let written = s.upload_ir(slot, &info, &data);
-                        let ended = s.batch_end();
-                        written?;
-                        ended?;
-                        let back = s.ir_data(slot)?;
-                        match back == data {
-                            true => read_irs(s),
-                            false => Err(hxs_core::Error::Nam(format!("IR {:03} was written but reads back different", slot + 1))),
-                        }
+                        let listed = stomp::upload_new_ir(s, slot, &info, &data)?;
+                        let shown = listed.into_iter().map(|ir| IrSlot { capture: ir.index == slot, index: ir.index, name: ir.name });
+                        Ok(JobResult::Irs(shown.collect()))
                     });
                 }
             });

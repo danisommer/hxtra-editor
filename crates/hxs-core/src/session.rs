@@ -274,8 +274,14 @@ impl Session {
     fn read_message(&mut self, id: ChannelId) -> Result<Vec<u8>> {
         let header = self.read_exact(id, msg::HEADER_LEN)?;
         let len = msg::body_len(&header);
-        if len > msg::MAX_BODY {
-            return Err(Error::Protocol(format!("a message announces {len} bytes, more than {} ({header:02x?})", msg::MAX_BODY)));
+        match (i32::from_le_bytes([header[4], header[5], header[6], header[7]]), len > msg::MAX_BODY) {
+            (signed, _) if signed < 0 => {
+                return Err(Error::Protocol(format!(
+                    "the device answered with a negative length ({signed}): what was asked is not ready on the unit yet ({header:02x?})"
+                )));
+            }
+            (_, true) => return Err(Error::Protocol(format!("a message announces {len} bytes, more than {} ({header:02x?})", msg::MAX_BODY))),
+            _ => {}
         }
         let mut body = Vec::with_capacity(len);
         while body.len() < len {
