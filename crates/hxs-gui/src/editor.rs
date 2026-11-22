@@ -608,6 +608,9 @@ impl App {
                 let cab = b.cab.map(|id| format!(" + {}", model_name(catalog, style, id))).unwrap_or_default();
                 ui.weak(format!("{}  {}", position_name(position), if category.is_empty() { "block" } else { &category }));
                 ui.heading(format!("{}{cab}", model_name(catalog, style, b.preset_id)));
+                if let (Some(c), Some(m)) = (catalog, model) {
+                    version_select(ui, b, c, m, style, &mut acts);
+                }
                 if let Some(cost) = model.and_then(|m| m.dsp_cost) {
                     ui.weak(format!("DSP {:.1}%", cost as f32 / 100.0));
                 }
@@ -723,8 +726,9 @@ impl App {
             Drag::Model { preset_id, cab, kind, .. } if layout.contains_key(&to) => {
                 let Some(old) = d.blocks.iter().find(|b| b.position == to).cloned() else { return };
                 let c = self.catalog_in_use();
+                let same_effect = |from: &Model, new: &Model| from.preset_id == new.preset_id || c.is_some_and(|c| c.variants(from).iter().any(|v| v.preset_id == new.preset_id));
                 let params = match (c.and_then(|c| c.model(old.preset_id)), c.and_then(|c| c.model(preset_id))) {
-                    (Some(from), Some(new)) => catalog::carry_values(from, &old.params, new),
+                    (Some(from), Some(new)) if same_effect(from, new) => catalog::carry_values(from, &old.params, new),
                     (_, Some(new)) => Ok(new.params.iter().map(Param::default_value).collect()),
                     (_, None) => Err(hxs_core::Error::Catalog(format!("model {preset_id} is not in the catalog"))),
                 };
@@ -1171,34 +1175,68 @@ fn capture_select(ui: &mut egui::Ui, id: egui::Id, v: &mut Value, number: f64, i
     knob::Touch { changed, began: changed }
 }
 
+/// The versions of the same effect a block can switch to (mono/stereo, amp/preamp, with or
+/// without its cab), each keeping the values the two have in common.
+fn versions(b: &Block, c: &Catalog, m: &Model, style: NameStyle) -> Vec<(String, u64, Option<u64>)> {
+    let label = |v: &Model, cab: Option<u64>| {
+        let kind = v.subcategory.as_deref().unwrap_or(v.shown_category());
+        match cab {
+            Some(cab) => format!("{} + {} ({kind})", v.display_name(style), model_name(Some(c), style, cab)),
+            None => format!("{} ({kind})", v.display_name(style)),
+        }
+    };
+    let mut out: Vec<(String, u64, Option<u64>)> = c
+        .variants(m)
+        .into_iter()
+        .map(|v| {
+            let cab = b.cab.filter(|cab| c.block_kind(v.preset_id, Some(*cab)).is_some());
+            (label(v, cab), v.preset_id, cab)
+        })
+        .collect();
+    match (b.cab, c.default_cab(m.preset_id)) {
+        (Some(_), _) => out.push((format!("{} without its cab", m.display_name(style)), m.preset_id, None)),
+        (None, Some(cab)) => out.push((label(m, Some(cab)), m.preset_id, Some(cab))),
+        (None, None) => {}
+    }
+    out
+}
+
+/// The switch to another version of the effect, as a target chain edit.
+fn switch_to(b: &Block, c: &Catalog, m: &Model, id: u64, cab: Option<u64>) -> Option<Act> {
+    let to = c.model(id)?;
+    let params = catalog::carry_values(m, &b.params, to).ok()?;
+    Some(Act::Target(vec![Block { preset_id: id, cab, kind: c.block_kind(id, cab).or(b.kind), params, ..b.clone() }], "switching the version"))
+}
+
+/// The panel's drop-down of the effect's versions.
+fn version_select(ui: &mut egui::Ui, b: &Block, c: &Catalog, m: &Model, style: NameStyle, acts: &mut Vec<Act>) {
+    let options = versions(b, c, m, style);
+    if options.is_empty() {
+        return;
+    }
+    let current = m.subcategory.clone().unwrap_or_else(|| m.shown_category().to_owned());
+    let current = if b.cab.is_some() { format!("{current} + cab") } else { current };
+    egui::ComboBox::from_id_salt(("versions", b.position)).selected_text(current).show_ui(ui, |ui| {
+        for (label, id, cab) in options {
+            if ui.selectable_label(false, label).on_hover_text("Keeps the values both versions have").clicked() {
+                acts.extend(switch_to(b, c, m, id, cab));
+            }
+        }
+    });
+}
+
 /// A block's menu (its "..." button and a right-click on it in the chain).
 fn block_menu(ui: &mut egui::Ui, b: &Block, c: Option<&Catalog>, model: Option<&Model>, style: NameStyle, hidden: &mut bool, acts: &mut Vec<Act>) {
     let p = b.position;
     if let (Some(c), Some(m)) = (c, model) {
-        ui.menu_button("Switch to", |ui| {
-            let mut targets: Vec<(String, u64, Option<u64>)> = c
-                .variants(m)
-                .into_iter()
-                .map(|v| (format!("{} ({})", v.display_name(style), v.subcategory.as_deref().unwrap_or(v.shown_category())), v.preset_id, b.cab))
-                .collect();
-            match (b.cab, c.default_cab(m.preset_id)) {
-                (Some(_), _) => targets.push(("without its cab".into(), m.preset_id, None)),
-                (None, Some(cab)) => targets.push((format!("with its cab ({})", model_name(Some(c), style, cab)), m.preset_id, Some(cab))),
-                (None, None) => {}
-            }
+        ui.menu_button("Switch version", |ui| {
+            let targets = versions(b, c, m, style);
             if targets.is_empty() {
-                ui.weak("no variant of this model");
+                ui.weak("no other version of this effect");
             }
             for (label, id, cab) in targets {
-                if ui.button(label).on_hover_text("Keeps the values both models have").clicked() {
-                    if let Some(to) = c.model(id) {
-                        match catalog::carry_values(m, &b.params, to) {
-                            Ok(params) => acts.push(Act::Target(vec![Block { preset_id: id, cab, kind: c.block_kind(id, cab).or(b.kind), params, ..b.clone() }], "switching the model")),
-                            Err(e) => {
-                                ui.label(format!("cannot switch: {e}"));
-                            }
-                        }
-                    }
+                if ui.button(label).on_hover_text("Keeps the values both versions have").clicked() {
+                    acts.extend(switch_to(b, c, m, id, cab));
                     ui.close_menu();
                 }
             }
