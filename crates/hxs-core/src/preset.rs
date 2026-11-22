@@ -53,7 +53,8 @@ pub struct Block {
 }
 
 impl Block {
-    fn parse(position: usize, body: &Value) -> Result<Self> {
+    /// A block from a grid cell's body (key 20), as presets and favorites (`0x40`) hold it.
+    pub fn parse(position: usize, body: &Value) -> Result<Self> {
         let bad = |what: &str| Error::Preset(format!("block at position {position}: {what}"));
         let values = msg::get(body, block_key::VALUES).ok_or_else(|| bad("no values"))?;
         let list = msg::get(values, block_key::VALUE_LIST).and_then(Value::as_array).ok_or_else(|| bad("no value list"))?;

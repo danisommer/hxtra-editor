@@ -28,18 +28,17 @@ Situação: **feito**, **parcial**, **em andamento**, **bloqueado** (falta desco
 | Importar IR `.wav` | **bloqueado** (mesmo `0x71`) | também falta reamostrar para 48 kHz e 2048 amostras como o HX Edit faz |
 | Identificar capturas na lista de IRs | **feito** | pelo cabeçalho `0.5, -0.5, 3.0, escala, 1871/1024`; o seletor do bloco NAM mostra só capturas |
 | Aba de IRs | **parcial** | a aba Library lista (com MD5) e esvazia slots; faltam importar, baixar, renomear |
-| Limpar os slots de teste 003 e 006 | a fazer, com confirmação | cópias da captura do slot 004 |
 
 ### Presets, setlists e biblioteca
 
 | Funcionalidade | Situação | O que se sabe |
 |---|---|---|
-| Copiar e colar blocos e presets inteiros | a fazer | preset inteiro: librarian `0x04` (ler) + `0x08` (gravar), já implementados; bloco: o corpo da célula da grade (`preset.rs`) + `0x27` (pôr modelo num bloco, com o corpo) |
-| Exportar e importar presets | a fazer | exportar o arquivo como o aparelho guarda (com a `0x64`, os snapshots 4–6), não como o `.hlx` do HX Edit, que os perde; importar `.hlx` do HX Edit é outra frente (converter JSON → MessagePack) |
+| Copiar e colar blocos e presets inteiros | **parcial** (2026-11-22, falta testar no aparelho) | preset inteiro **feito**: interface, clique direito num preset → "Copy to another slot" (`0x04` + `0x08` em lote, releitura comparada); bloco: a fazer, depende de `0x27` (pôr modelo num bloco, com o corpo), grupo 2 |
+| Exportar e importar presets | **parcial** (falta testar no aparelho) | exportar `.l6p` **feito** (clique direito → "Export to a file", com a `0x64`, os snapshots 4–6); importar `.l6p` já existia ("Write one preset file"); importar `.hlx` do HX Edit é outra frente (converter JSON → MessagePack) |
 | Exportar e importar setlists | a fazer | `0x00` lista as setlists; o HX Stomp tem uma só ("PRESETS") |
 | Exportar e importar backups completos | **parcial** | `hxs backup`/`restore` já fazem pasta com manifesto e SHA-256; faltam um arquivo único e, talvez, ler e gravar o `.hxb` do HX Edit |
 | Arrastar presets entre posições | a fazer, precisa de captura | [HXtra] mover um preset permuta `perm` (`dir[perm[slot]].id`); comando desconhecido |
-| Aba de favoritos | **parcial** | o núcleo lista, lê, grava e apaga (`0x70`–`0x74`); falta a aba e criar a partir de um bloco (`0x77`) |
+| Aba de favoritos | **feito** (2026-11-22, falta testar no aparelho) | aba Favorites: lista com o modelo de cada favorito (o `0x40` é uma célula da grade), apagar (`0x74`) com confirmação; "Save as favorite" em cada bloco (`0x77`, com o próximo número, como o HX Edit) |
 | Atualizar um favorito a partir de um bloco editado | a fazer | só quando o bloco era **idêntico** ao favorito antes da edição: sugerir salvar a alteração no favorito e oferecer aplicá-la em todos os presets que usam esse favorito (comparar o corpo do bloco com o do favorito; gravar com `0x72` e `0x08`) |
 
 ### Edição do preset e cadeia de sinal
@@ -48,10 +47,10 @@ Situação: **feito**, **parcial**, **em andamento**, **bloqueado** (falta desco
 |---|---|---|
 | Mover, adicionar e remover blocos; trocar modelo | a fazer, precisa de captura | `0x27` põe um modelo num bloco, `0x2d` remove, `0x4e` seleciona; o notify `0x31` informa bloco movido `{0x4b, 0x4c}`, mas o comando de mover é desconhecido |
 | Série ou paralelo | a fazer, precisa de captura | split e join são células da grade (posições 9, 10 e 19) |
-| Trocar de variante preservando parâmetros comuns | a fazer | mono ↔ estéreo, amp + cab ↔ amp ↔ preamp e afins: por padrão, manter os valores dos parâmetros que existem nos dois modelos (casar pelo `name` do parâmetro no catálogo); botão bem visível para voltar aos padrões de fábrica |
-| Medidor de DSP (quanto cada coisa consome) | a fazer | o catálogo já traz `dsp_cost` por modelo (Table 1 do firmware); [HXtra] a funcionalidade DSP meter (configuração 107) mostra o uso no aparelho; confirmar a unidade e o limite total |
+| Trocar de variante preservando parâmetros comuns | **parcial** (2026-11-22) | o cálculo está pronto em `catalog.rs`: `variants` (mono ↔ estéreo e amp ↔ preamp pelo nome interno: 258 pares no catálogo, todos coerentes), `carry_values` (mantém os parâmetros de mesmo nome e tipo, dentro da faixa do novo modelo; os outros vão ao padrão) e `default_values` (o "voltar aos padrões de fábrica"). Falta aplicar no aparelho, que depende da troca de modelo (`0x27`, grupo 2); amp + cab ↔ amp depende de ver um bloco amp + cab |
+| Medidor de DSP (quanto cada coisa consome) | **feito** (2026-11-22) | [HXtra, verificado offline] custo em centésimos de %, total do preset = 1500 fixos + blocos, limite 9000 (`docs/research/m4/dsp-cost.md`); a aba Preset mostra a barra e cada bloco o seu custo. Falta: o segundo modelo de um bloco amp + cab, que também conta |
 | Nome e cor de cada bloco, refletidos no aparelho | a fazer, a verificar | confirmar se o firmware 3.80 do HX Stomp guarda nome e cor por bloco e onde; precisa de captura |
-| Tempo: digitar e tap tempo, global e por preset | a fazer | [fato] configuração 15 = BPM global, 16 = tempo do preset (o tap muda a 16); diferenciar os dois na interface; comando próprio de tap desconhecido |
+| Tempo: digitar e tap tempo, global e por preset | **feito** (2026-11-22, falta testar no aparelho) | aba Preset: tempo do preset (configuração 16, entra nas edições do preset) e tempo global (15), digitados ou arrastados, de 20 a 240 BPM; botão Tap (média dos últimos toques, como o tap do aparelho, que muda a 16). Em aberto: a configuração global que escolhe se o tempo vale por preset ou global |
 
 ### Snapshots, bypass e controllers
 
@@ -73,4 +72,6 @@ Situação: **feito**, **parcial**, **em andamento**, **bloqueado** (falta desco
 
 | Funcionalidade | Situação | O que se sabe |
 |---|---|---|
-| Direção visual | aguardando | o usuário pesquisa referências de interface e passa o retorno |
+| Direção visual | primeira referência recebida (2026-11-22); o usuário segue pesquisando | inspiração: um editor de outra pedaleira com tema escuro, a cadeia de sinal como uma grade de blocos com ícones coloridos por categoria, e embaixo o painel do bloco selecionado com um **knob por parâmetro** (valor e unidade embaixo) e um **interruptor on/off** para parâmetros booleanos. Pedidos para o nosso: um **seletor** para listas não numéricas (nem knob nem on/off) e outros tipos de entrada conforme o efeito; a grade do HX Stomp é mais simples (menos blocos, dois caminhos). Inspiração, não cópia: nada de reproduzir o visual de outro produto |
+| Controles do painel do bloco | a fazer (depois do grupo 1) | float → knob com valor e unidade; bool → interruptor on/off; lista → seletor com os rótulos; captura → seletor de slots de captura; os tipos e rótulos já vêm do catálogo |
+| Limpar os slots de teste 003 e 006 | **feito** (2026-11-22) | esvaziados com `hxs delete-ir`, conferidos pela lista |

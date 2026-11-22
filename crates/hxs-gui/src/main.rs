@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use hxs_core::backup;
@@ -37,6 +37,7 @@ fn main() -> eframe::Result<()> {
 enum Tab {
     Preset,
     Library,
+    Favorites,
     Catalog,
     Settings,
     Log,
@@ -47,6 +48,48 @@ enum JobResult {
     Plan(PathBuf, Plan),
     Irs(Vec<IrSlot>),
     EditBuffer(Vec<u8>),
+    Favorites(Vec<FavoriteView>),
+    Lists(Vec<IrSlot>, Vec<FavoriteView>),
+}
+
+#[derive(Clone)]
+struct FavoriteView {
+    index: u64,
+    name: String,
+    block: Option<Block>,
+}
+
+/// The favorites with the block each one holds (`0x40` is a grid cell, its key 20 the block body).
+fn read_favorites(s: &mut stomp::Stomp) -> hxs_core::Result<JobResult> {
+    let list = s.favorite_list()?;
+    let views = list
+        .into_iter()
+        .map(|f| {
+            let v = s.favorite(f.index)?;
+            let block = hxs_core::msg::get(&v, 0x40).and_then(|cell| hxs_core::msg::get(cell, 20)).and_then(|body| Block::parse(0, body).ok());
+            Ok(FavoriteView { index: f.index, name: f.name, block })
+        })
+        .collect::<hxs_core::Result<Vec<_>>>()?;
+    Ok(JobResult::Favorites(views))
+}
+
+const SETTING_GLOBAL_BPM: u64 = 15;
+const SETTING_PRESET_TEMPO: u64 = 16;
+const TEMPO_RANGE: std::ops::RangeInclusive<f32> = 20.0..=240.0;
+const TAP_GAP: Duration = Duration::from_millis(2500);
+const TAPS_KEPT: usize = 5;
+
+/// BPM from tap times: the mean of the last intervals.
+fn tap_bpm(taps: &[Instant]) -> Option<f32> {
+    let gaps: Vec<f32> = taps.windows(2).map(|w| (w[1] - w[0]).as_secs_f32()).collect();
+    match gaps.is_empty() {
+        true => None,
+        false => Some((60.0 * gaps.len() as f32 / gaps.iter().sum::<f32>()).clamp(*TEMPO_RANGE.start(), *TEMPO_RANGE.end())),
+    }
+}
+
+fn setting_f32(g: &Globals, id: u64) -> Option<f32> {
+    g.entries().iter().filter(|e| e.id == id).min_by_key(|e| e.group == 3).and_then(|e| e.value.as_f64()).map(|v| v as f32)
 }
 
 #[derive(Clone)]
@@ -69,6 +112,7 @@ fn read_irs(s: &mut stomp::Stomp) -> hxs_core::Result<JobResult> {
 enum Edit {
     Enable { block: u64, on: bool },
     Param { block: u64, index: u64, value: Value },
+    Favorite { block: u64, name: String },
 }
 
 struct Device {
@@ -80,6 +124,8 @@ struct Device {
     firmware: Option<u64>,
     snapshot: Option<u64>,
     edited: bool,
+    preset_tempo: Option<f32>,
+    global_bpm: Option<f32>,
 }
 
 struct App {
@@ -115,6 +161,16 @@ struct App {
     search: String,
     setting_id: String,
     setting_value: String,
+    taps: Vec<Instant>,
+    favorites: Vec<FavoriteView>,
+    allow_favorite_delete: bool,
+    new_favorite: Option<(u64, String)>,
+    copy_from: usize,
+    copy_to: usize,
+    copy_name: String,
+    confirm_copy: bool,
+    export_slot: usize,
+    export_file: String,
 }
 
 impl App {
@@ -153,6 +209,16 @@ impl App {
             search: String::new(),
             setting_id: String::new(),
             setting_value: String::new(),
+            taps: Vec::new(),
+            favorites: Vec::new(),
+            allow_favorite_delete: false,
+            new_favorite: None,
+            copy_from: 0,
+            copy_to: 0,
+            copy_name: String::new(),
+            confirm_copy: false,
+            export_slot: 0,
+            export_file: String::new(),
         };
         app.load_catalog(None);
         app
@@ -214,19 +280,27 @@ impl App {
         let (blocks, snapshot_names) = parsed.as_ref().map(preset_view).unwrap_or_default();
         self.save_name = s.current.name.clone();
         self.note(format!("connected: setlist {} slot {:03} \"{}\", {} presets", s.current.setlist, s.current.slot, s.current.name, s.presets.len()));
+        let globals = Globals::parse(s.globals).ok();
+        let tempo = |id| globals.as_ref().and_then(|g| setting_f32(g, id));
+        let (preset_tempo, global_bpm) = (tempo(SETTING_PRESET_TEMPO), tempo(SETTING_GLOBAL_BPM));
         self.device = Some(Device {
             current: s.current,
             presets: s.presets,
             blocks,
             snapshot_names,
-            globals: Globals::parse(s.globals).ok(),
+            globals,
             firmware,
             snapshot: None,
             edited: false,
+            preset_tempo,
+            global_bpm,
         });
         self.catalog_ignored = false;
         self.check_catalog();
-        self.start_job("reading the IR list", read_irs);
+        self.start_job("reading the IR list and the favorites", |s| match (read_irs(s)?, read_favorites(s)?) {
+            (JobResult::Irs(irs), JobResult::Favorites(favorites)) => Ok(JobResult::Lists(irs, favorites)),
+            _ => unreachable!("read_irs and read_favorites return their own variants"),
+        });
     }
 
     fn load_edit_buffer(&mut self, bytes: Vec<u8>) {
@@ -279,6 +353,15 @@ impl App {
                     self.irs = irs;
                 }
                 Ok(JobResult::EditBuffer(b)) => self.load_edit_buffer(b),
+                Ok(JobResult::Favorites(f)) => {
+                    self.note(format!("{label}: {} favorites", f.len()));
+                    self.favorites = f;
+                }
+                Ok(JobResult::Lists(irs, f)) => {
+                    self.note(format!("{label}: {} IR slots, {} favorites", irs.len(), f.len()));
+                    self.irs = irs;
+                    self.favorites = f;
+                }
                 Err(e) => self.note(format!("{label} failed: {e}")),
             }
         }
@@ -301,7 +384,16 @@ impl App {
                 }
                 self.load_edit_buffer(edit_buffer);
             }
-            Event::SettingChanged { .. } => {}
+            Event::SettingChanged { id, value } => {
+                let v = value.as_f64().map(|v| v as f32);
+                if let Some(d) = self.device.as_mut() {
+                    match id {
+                        SETTING_PRESET_TEMPO => d.preset_tempo = v.or(d.preset_tempo),
+                        SETTING_GLOBAL_BPM => d.global_bpm = v.or(d.global_bpm),
+                        _ => {}
+                    }
+                }
+            }
             Event::PresetRenamed { setlist, slot, name } => {
                 if let Some(p) = self.device.as_mut().and_then(|d| d.presets.iter_mut().find(|p| p.slot == slot as usize)) {
                     p.name = name.clone();
@@ -374,7 +466,14 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            for (tab, name) in [(Tab::Preset, "Preset"), (Tab::Library, "Library"), (Tab::Catalog, "Catalog"), (Tab::Settings, "Settings"), (Tab::Log, "Log")] {
+            for (tab, name) in [
+                (Tab::Preset, "Preset"),
+                (Tab::Library, "Library"),
+                (Tab::Favorites, "Favorites"),
+                (Tab::Catalog, "Catalog"),
+                (Tab::Settings, "Settings"),
+                (Tab::Log, "Log"),
+            ] {
                 ui.selectable_value(&mut self.tab, tab, name);
             }
             ui.separator();
@@ -388,17 +487,36 @@ impl App {
             return;
         };
         let (setlist, current) = (d.current.setlist, d.current.slot as usize);
-        let mut chosen = None;
+        let (mut chosen, mut copy, mut export) = (None, None, None);
         egui::ScrollArea::vertical().id_salt("presets").show(ui, |ui| {
             for p in &d.presets {
-                if ui.selectable_label(p.slot == current, format!("{:03}  {}", p.slot, p.name)).clicked() {
+                let r = ui.selectable_label(p.slot == current, format!("{:03}  {}", p.slot, p.name)).on_hover_text("Right-click: copy or export");
+                if r.clicked() {
                     chosen = Some(p.slot);
                 }
+                r.context_menu(|ui| {
+                    if ui.button("Copy to another slot...").clicked() {
+                        copy = Some((p.slot, p.name.clone()));
+                        ui.close_menu();
+                    }
+                    if ui.button("Export to a file...").clicked() {
+                        export = Some((p.slot, p.name.clone()));
+                        ui.close_menu();
+                    }
+                });
             }
         });
         if let Some(slot) = chosen {
             let p = self.handle.select_preset(setlist, slot);
             self.op(format!("load preset {slot:03}"), p);
+        }
+        if let Some((slot, name)) = copy {
+            (self.copy_from, self.copy_name, self.confirm_copy, self.tab) = (slot, name, false, Tab::Library);
+        }
+        if let Some((slot, name)) = export {
+            self.export_slot = slot;
+            self.export_file = default_export_path(slot, &name);
+            self.tab = Tab::Library;
         }
     }
 
@@ -445,6 +563,9 @@ impl App {
             }
             ui.checkbox(&mut self.show_hidden, "hidden parameters");
         });
+        self.tempo_row(ui);
+        self.dsp_row(ui);
+        self.favorite_prompt(ui);
         ui.separator();
         let mut edits = Vec::new();
         let catalog = match self.catalog_ignored {
@@ -474,7 +595,138 @@ impl App {
                     let p = self.handle.set_parameter(block, 0, index, value);
                     self.op(format!("block {block} parameter {index}"), p);
                 }
+                Edit::Favorite { block, name } => self.new_favorite = Some((block, name)),
             }
+        }
+    }
+
+    fn tempo_row(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = self.device.as_mut() else { return };
+        let mut writes = Vec::new();
+        ui.horizontal(|ui| {
+            ui.label("Preset tempo:");
+            match d.preset_tempo.as_mut() {
+                Some(t) => {
+                    if ui.add(egui::DragValue::new(t).range(TEMPO_RANGE).speed(0.1).suffix(" BPM")).changed() {
+                        writes.push((SETTING_PRESET_TEMPO, *t));
+                    }
+                }
+                None => {
+                    ui.label("?");
+                }
+            }
+            if ui.button("Tap").on_hover_text("Tap at least twice: sets the current preset's tempo (as the unit's tap does)").clicked() {
+                let now = Instant::now();
+                if self.taps.last().is_some_and(|t| now - *t > TAP_GAP) {
+                    self.taps.clear();
+                }
+                self.taps.push(now);
+                if self.taps.len() > TAPS_KEPT {
+                    self.taps.remove(0);
+                }
+                if let Some(bpm) = tap_bpm(&self.taps) {
+                    d.preset_tempo = Some(bpm);
+                    writes.push((SETTING_PRESET_TEMPO, bpm));
+                }
+            }
+            ui.separator();
+            ui.label("Global tempo:");
+            match d.global_bpm.as_mut() {
+                Some(t) => {
+                    if ui.add(egui::DragValue::new(t).range(TEMPO_RANGE).speed(0.1).suffix(" BPM")).changed() {
+                        writes.push((SETTING_GLOBAL_BPM, *t));
+                    }
+                }
+                None => {
+                    ui.label("?");
+                }
+            }
+        });
+        if writes.iter().any(|(id, _)| *id == SETTING_PRESET_TEMPO) {
+            d.edited = true;
+        }
+        for (id, bpm) in writes {
+            let p = self.handle.set_setting(id, Value::F32(bpm));
+            self.op(format!("tempo {bpm:.1} BPM (setting {id})"), p);
+        }
+    }
+
+    fn dsp_row(&self, ui: &mut egui::Ui) {
+        let (Some(d), Some(c)) = (&self.device, self.catalog.as_ref().filter(|_| !self.catalog_ignored)) else { return };
+        let ids: Vec<u64> = d.blocks.iter().map(|b| b.preset_id).collect();
+        let (total, unknown) = c.dsp_total(&ids);
+        ui.horizontal(|ui| {
+            ui.label("DSP:");
+            let bar = egui::ProgressBar::new(total as f32 / 10000.0).desired_width(240.0).text(format!("{:.1}% of {:.0}%", total as f32 / 100.0, catalog::DSP_LIMIT as f32 / 100.0));
+            ui.add(bar).on_hover_text("The firmware's declared costs: 15% fixed plus each block's (HXtra's research); the unit refuses a preset above 90%");
+            if !unknown.is_empty() {
+                ui.label(format!("(not counted: models {unknown:?})"));
+            }
+        });
+    }
+
+    fn favorite_prompt(&mut self, ui: &mut egui::Ui) {
+        let Some((block, name)) = self.new_favorite.as_mut() else { return };
+        let block = *block;
+        let (mut save, mut cancel) = (false, false);
+        ui.horizontal(|ui| {
+            ui.label(format!("Save block {} as a new favorite, named:", snapshot::slot_label(block as usize).unwrap_or_default()));
+            ui.add(egui::TextEdit::singleline(name).desired_width(160.0).char_limit(stomp::MAX_PRESET_NAME));
+            save = ui.button("Save favorite").on_hover_text("Writes a new favorite to the unit").clicked();
+            cancel = ui.button("Cancel").clicked();
+        });
+        match (save, cancel) {
+            (true, _) => {
+                let name = name.clone();
+                let index = self.favorites.len() as u64;
+                self.new_favorite = None;
+                self.start_job("saving the favorite", move |s| {
+                    s.save_block_as_favorite(block, index, &name)?;
+                    read_favorites(s)
+                });
+            }
+            (false, true) => self.new_favorite = None,
+            (false, false) => {}
+        }
+    }
+
+    fn favorites_tab(&mut self, ui: &mut egui::Ui) {
+        let connected = self.device.is_some() && self.job.is_none();
+        ui.horizontal(|ui| {
+            ui.heading("Favorites");
+            if ui.add_enabled(connected, egui::Button::new("Refresh")).clicked() {
+                self.start_job("reading the favorites", read_favorites);
+            }
+            ui.checkbox(&mut self.allow_favorite_delete, "allow deleting");
+        });
+        ui.label("A favorite is a block saved with its settings. Save one from a block in the Preset tab.");
+        let catalog = self.catalog.as_ref().filter(|_| !self.catalog_ignored);
+        let style = self.style;
+        let mut delete = None;
+        egui::ScrollArea::vertical().id_salt("favorites").show(ui, |ui| {
+            egui::Grid::new("favorites_grid").striped(true).show(ui, |ui| {
+                for f in &self.favorites {
+                    ui.label(format!("{:02}", f.index + 1));
+                    ui.strong(&f.name);
+                    let model = f.block.as_ref().map(|b| b.preset_id);
+                    ui.label(match (model, catalog.zip(model).and_then(|(c, id)| c.model(id))) {
+                        (_, Some(m)) => format!("{} ({})", m.display_name(style), m.shown_category()),
+                        (Some(id), None) => format!("model {id}"),
+                        (None, None) => "?".into(),
+                    });
+                    if ui.add_enabled(connected && self.allow_favorite_delete, egui::Button::new("Delete")).clicked() {
+                        delete = Some(f.index);
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+        if let Some(index) = delete {
+            self.allow_favorite_delete = false;
+            self.start_job("deleting the favorite", move |s| {
+                s.delete_favorite(index)?;
+                read_favorites(s)
+            });
         }
     }
 
@@ -543,6 +795,59 @@ impl App {
                     }))
                 });
             }
+            ui.separator();
+            ui.heading("Copy a preset to another slot");
+            ui.label("The whole preset as the unit stores it, snapshots 4-6 included. Right-click a preset in the list to start here.");
+            ui.horizontal(|ui| {
+                ui.label("From slot:");
+                ui.add(egui::DragValue::new(&mut self.copy_from).range(0..=125));
+                ui.label("to slot:");
+                ui.add(egui::DragValue::new(&mut self.copy_to).range(0..=125));
+                ui.label("named:");
+                ui.add(egui::TextEdit::singleline(&mut self.copy_name).desired_width(160.0).char_limit(stomp::MAX_PRESET_NAME));
+                let target = self.device.as_ref().and_then(|d| d.presets.get(self.copy_to)).map_or("?".to_owned(), |p| p.name.clone());
+                ui.checkbox(&mut self.confirm_copy, format!("overwrite {:03} \"{target}\"", self.copy_to));
+                let ready = connected && self.confirm_copy && self.copy_from != self.copy_to;
+                if ui.add_enabled(ready, egui::Button::new("Copy")).clicked() {
+                    let (from, to, name) = (self.copy_from, self.copy_to, self.copy_name.clone());
+                    self.confirm_copy = false;
+                    self.start_job("copying the preset", move |s| {
+                        stomp::validate_name(&name)?;
+                        let file = s.preset_file(setlist, from)?;
+                        s.batch_begin()?;
+                        let written = s.upload_preset(setlist, to, &name, ListFlags::default(), &file);
+                        let ended = s.batch_end();
+                        written?;
+                        ended?;
+                        let back = s.preset_file(setlist, to)?;
+                        Ok(JobResult::Text(match back == file {
+                            true => format!("{from:03} copied to {to:03} \"{name}\", read back identical"),
+                            false => format!("{from:03} copied to {to:03}, but the read back differs"),
+                        }))
+                    });
+                }
+            });
+            ui.separator();
+            ui.heading("Export a preset to a file");
+            ui.label("Saved as the unit stores it (.l6p, snapshots 4-6 included): it imports back with \"Write one preset file\" below.");
+            ui.horizontal(|ui| {
+                ui.label("Slot:");
+                ui.add(egui::DragValue::new(&mut self.export_slot).range(0..=125));
+                ui.label("file:");
+                ui.add(egui::TextEdit::singleline(&mut self.export_file).desired_width(420.0));
+                if ui.add_enabled(connected && !self.export_file.is_empty(), egui::Button::new("Export")).clicked() {
+                    let (slot, file) = (self.export_slot, PathBuf::from(&self.export_file));
+                    self.start_job("exporting the preset", move |s| {
+                        let bytes = s.preset_file(setlist, slot)?;
+                        PresetFile::parse(bytes.clone())?;
+                        if let Some(dir) = file.parent() {
+                            std::fs::create_dir_all(dir)?;
+                        }
+                        std::fs::write(&file, &bytes)?;
+                        Ok(JobResult::Text(format!("{slot:03} -> {} ({} bytes, sha256 {})", file.display(), bytes.len(), backup::sha256_hex(&bytes))))
+                    });
+                }
+            });
             ui.separator();
             ui.heading("Write one preset file into a slot");
             ui.horizontal(|ui| {
@@ -772,6 +1077,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Preset => self.preset_tab(ui),
             Tab::Library => self.library_tab(ui),
+            Tab::Favorites => self.favorites_tab(ui),
             Tab::Catalog => self.catalog_tab(ui),
             Tab::Settings => self.settings_tab(ui),
             Tab::Log => self.log_tab(ui),
@@ -807,6 +1113,13 @@ fn block_ui(ui: &mut egui::Ui, b: &mut Block, model: Option<&Model>, style: Name
             ui.strong(title);
             if let Some(m) = model {
                 ui.label(model_notes(m, style));
+                if let Some(cost) = m.dsp_cost {
+                    ui.label(format!("DSP {:.1}%", cost as f32 / 100.0));
+                }
+            }
+            if ui.small_button("Save as favorite").clicked() {
+                let name: String = model.map_or("Favorite".to_owned(), |m| m.display_name(style).chars().filter(|c| (' '..='~').contains(c)).take(stomp::MAX_PRESET_NAME).collect());
+                edits.push(Edit::Favorite { block, name });
             }
         });
         egui::Grid::new(("params", b.position)).num_columns(3).show(ui, |ui| {
@@ -962,6 +1275,27 @@ fn default_backup_dir() -> String {
     base.join("Documents").join("hxtra-editor backups").join(format!("backup-{secs}")).display().to_string()
 }
 
+fn default_export_path(slot: usize, name: &str) -> String {
+    let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
+    let base = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default();
+    base.join("Documents").join("hxtra-editor presets").join(format!("{slot:03} {}.l6p", safe.trim())).display().to_string()
+}
+
 fn version_text(f: u64) -> String {
     format!("{:x}.{:x}.{:x}", f >> 24, (f >> 16) & 0xFF, (f >> 8) & 0xFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tap_tempo_is_the_mean_interval() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        assert_eq!(tap_bpm(&[at(0)]), None);
+        assert_eq!(tap_bpm(&[at(0), at(500), at(1000)]), Some(120.0));
+        assert_eq!(tap_bpm(&[at(0), at(10)]), Some(240.0), "clamped to the unit's range");
+        assert_eq!(tap_bpm(&[at(0), at(5000)]), Some(20.0));
+    }
 }

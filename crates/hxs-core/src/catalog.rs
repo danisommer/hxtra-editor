@@ -61,6 +61,11 @@ pub struct Model {
     pub params: Vec<Param>,
 }
 
+/// The DSP cost every preset pays before its blocks, and the most a preset may total
+/// (HXtra docs/research/m4/dsp-cost.md); costs are hundredths of a per cent of the DSP.
+pub const DSP_FIXED: u64 = 1500;
+pub const DSP_LIMIT: u64 = 9000;
+
 pub const ROLE_CAPTURE: &str = "capture";
 pub const ROLE_CAPTURE_SLOT: &str = "capture_slot";
 
@@ -166,6 +171,21 @@ impl Catalog {
         self.by_preset_id.get(&preset_id).map(|&i| &self.models[i])
     }
 
+    /// A preset's DSP use: the fixed part plus each block's cost, and the blocks whose model
+    /// the catalog does not price (their cost is left out of the total).
+    pub fn dsp_total(&self, preset_ids: &[u64]) -> (u64, Vec<u64>) {
+        let (priced, unknown): (Vec<_>, Vec<_>) = preset_ids.iter().map(|&id| (id, self.model(id).and_then(|m| m.dsp_cost))).partition(|(_, c)| c.is_some());
+        let total = DSP_FIXED + priced.iter().filter_map(|(_, c)| *c).sum::<u64>();
+        (total, unknown.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// The other models that are the same effect: its mono and stereo versions, and an amp's
+    /// preamp (or the reverse), by internal name.
+    pub fn variants(&self, of: &Model) -> Vec<&Model> {
+        let key = variant_key(&of.name);
+        self.models.iter().filter(|m| m.preset_id != of.preset_id && variant_key(&m.name) == key).collect()
+    }
+
     /// Refuse a catalog made from another firmware version than the unit's (from its preset files).
     pub fn check_firmware(&self, unit_firmware: u64) -> Result<()> {
         match self.source.firmware {
@@ -244,6 +264,28 @@ impl Param {
         }
     }
 
+    /// The default as the value type a preset stores for this parameter.
+    pub fn default_value(&self) -> Value {
+        self.typed(self.default)
+    }
+
+    /// `v` in this parameter's type, within its range.
+    pub fn clamped(&self, v: &Value) -> Value {
+        let n = v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)).or_else(|| v.as_bool().map(|b| f64::from(u8::from(b))));
+        match n {
+            Some(n) => self.typed(n.clamp(self.min.min(self.max), self.max.max(self.min))),
+            None => self.default_value(),
+        }
+    }
+
+    fn typed(&self, n: f64) -> Value {
+        match self.kind {
+            ParamKind::Float | ParamKind::Data => Value::F32(n as f32),
+            ParamKind::Int | ParamKind::List => Value::from(n.round() as i64),
+            ParamKind::Bool => Value::from(n != 0.0),
+        }
+    }
+
     fn accepted(&self) -> String {
         match &self.choices {
             Some(c) => c.iter().map(|c| c.label.as_str()).collect::<Vec<_>>().join(", "),
@@ -267,6 +309,46 @@ impl Param {
             _ => v.to_string(),
         }
     }
+}
+
+/// `HD2_FlangerDynamixFlangerMono` and `...Stereo` share `HD2_FlangerDynamixFlanger`;
+/// `HD2_AmpPVPanama` and `HD2_PreampPVPanama` share `HD2_PVPanama`.
+fn variant_key(name: &str) -> String {
+    let base = name.strip_suffix("Mono").or_else(|| name.strip_suffix("Stereo")).unwrap_or(name);
+    match base.split_once('_') {
+        Some((prefix, rest)) => {
+            let rest = rest.strip_prefix("Preamp").or_else(|| rest.strip_prefix("Amp")).unwrap_or(rest);
+            format!("{prefix}_{rest}")
+        }
+        None => base.to_owned(),
+    }
+}
+
+/// The values for `to` when a block changes from model `from` (holding `values`): a parameter
+/// both models have (same internal name and type) keeps its value, clamped to `to`'s range;
+/// every other one takes `to`'s default. An internal data parameter only `to` has has no
+/// default to write, which is an error.
+pub fn carry_values(from: &Model, values: &[Value], to: &Model) -> Result<Vec<Value>> {
+    to.params
+        .iter()
+        .map(|p| {
+            let kept = from.params.iter().find(|f| f.name == p.name && f.kind == p.kind).and_then(|f| values.get(f.index));
+            match (kept, p.kind) {
+                (Some(v), ParamKind::Data) => Ok(v.clone()),
+                (Some(v), _) => Ok(p.clamped(v)),
+                (None, ParamKind::Data) => Err(Error::Catalog(format!("{} has internal data ({}) that {} does not carry", to.title, p.title, from.title))),
+                (None, _) => Ok(p.default_value()),
+            }
+        })
+        .collect()
+}
+
+/// The same values with each one back at `model`'s default (the "restore defaults" of a block).
+pub fn default_values(model: &Model, values: &[Value]) -> Vec<Value> {
+    model.params.iter().map(|p| match p.kind {
+        ParamKind::Data => values.get(p.index).cloned().unwrap_or(Value::Nil),
+        _ => p.default_value(),
+    }).collect()
 }
 
 fn on_off(b: bool) -> String {
@@ -359,6 +441,45 @@ mod tests {
         assert_eq!(m.param(2).unwrap().format(&Value::F32(0.027)), "27.0 ms");
         assert_eq!(m.param(0).unwrap().format(&Value::F32(-27.5)), "-27.5 dB");
         assert_eq!(m.param(1).unwrap().format(&Value::from(1)), "3:1");
+    }
+
+    fn flanger(id: u64, name: &str, extra: bool) -> serde_json::Value {
+        let p = |i: usize, n: &str, kind: &str, min: f64, max: f64, def: f64| {
+            serde_json::json!({"index": i, "slot": i + 1, "name": n, "title": n, "short_title": null, "type": kind, "min": min, "max": max,
+                "default": def, "unit": null, "display": "knob", "choices": null, "visible": true, "sync": false})
+        };
+        let mut params = vec![p(0, "Rate", "float", 0.0, 1.0, 0.5), p(1, "Mode", "list", 0.0, 2.0, 0.0)];
+        if extra {
+            params.push(p(2, "Spread", "float", 0.0, 1.0, 0.25));
+        }
+        serde_json::json!({"preset_id": id, "model_id": id, "name": name, "title": "Flanger", "stock_title": null, "real_name": null,
+            "category": "modulation", "subcategory": null, "legacy": null, "dsp_cost": 700, "hxtra_added": false, "params": params})
+    }
+
+    fn two_flangers() -> Catalog {
+        let mut c: serde_json::Value = serde_json::from_str(SAMPLE).unwrap();
+        c["models"] = serde_json::json!([flanger(304, "HD2_FlangerDynamixFlangerMono", false), flanger(305, "HD2_FlangerDynamixFlangerStereo", true)]);
+        Catalog::parse(c.to_string().as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_variant_keeps_the_values_both_models_have() {
+        let c = two_flangers();
+        let (mono, stereo) = (c.model(304).unwrap(), c.model(305).unwrap());
+        assert_eq!(c.variants(mono).iter().map(|m| m.preset_id).collect::<Vec<_>>(), vec![305]);
+        let to_stereo = carry_values(mono, &[Value::F32(0.8), Value::from(2)], stereo).unwrap();
+        assert_eq!(to_stereo, vec![Value::F32(0.8), Value::from(2), Value::F32(0.25)], "Spread takes the stereo default");
+        let back = carry_values(stereo, &[Value::F32(1.7), Value::from(1), Value::F32(0.9)], mono).unwrap();
+        assert_eq!(back, vec![Value::F32(1.0), Value::from(1)], "clamped to the range, Spread dropped");
+        assert_eq!(default_values(stereo, &to_stereo), vec![Value::F32(0.5), Value::from(0), Value::F32(0.25)]);
+        assert_eq!(variant_key("HD2_AmpPVPanama"), variant_key("HD2_PreampPVPanama"));
+    }
+
+    #[test]
+    fn dsp_total_is_the_fixed_part_plus_known_blocks() {
+        let c = two_flangers();
+        assert_eq!(c.dsp_total(&[304, 305]), (DSP_FIXED + 1400, vec![]));
+        assert_eq!(c.dsp_total(&[304, 999]), (DSP_FIXED + 700, vec![999]));
     }
 
     #[test]

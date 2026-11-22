@@ -35,6 +35,7 @@ mod editor_cmd {
     pub const SELECT_SNAPSHOT: u8 = 0x58;
     pub const GLOBALS: u8 = 0x55;
     pub const GLOBALS_WRITE: u8 = 0x56;
+    pub const SAVE_FAVORITE: u8 = 0x77;
 }
 
 mod librarian_cmd {
@@ -50,6 +51,7 @@ mod librarian_cmd {
     pub const FAVORITE_LIST: u8 = 0x70;
     pub const FAVORITE: u8 = 0x71;
     pub const FAVORITE_WRITE: u8 = 0x72;
+    pub const FAVORITE_DELETE: u8 = 0x74;
     pub const BATCH_END: u8 = 0xfe;
     pub const BATCH_BEGIN: u8 = 0xff;
 }
@@ -60,6 +62,7 @@ mod key {
     pub const NAME: u64 = 0x6d;
     pub const IR_INDEX: u64 = 0x70;
     pub const LIST_MD5: u64 = 0x68;
+    pub const FAVORITE_NEW: u64 = 0x1f;
     pub const FORMAT: u64 = 0x65;
     pub const FAVORITE_INDEX: u64 = 0x76;
     pub const MODIFIED: u64 = 0x75;
@@ -359,6 +362,24 @@ impl Stomp {
 
     pub fn favorite(&mut self, index: u64) -> Result<Value> {
         self.session.request(self.librarian, librarian_cmd::FAVORITE, int_map(&[(key::FAVORITE_INDEX, Value::from(index))]))
+    }
+
+    /// Delete a favorite (librarian 0x74, as HX Edit does in capture 12; notify 0x3b follows).
+    pub fn delete_favorite(&mut self, index: u64) -> Result<()> {
+        self.session.request(self.librarian, librarian_cmd::FAVORITE_DELETE, int_map(&[(key::FAVORITE_INDEX, Value::from(index))])).map(drop)
+    }
+
+    /// Save a block of the edit buffer as favorite number `index` (editor 0x77, as HX Edit does
+    /// in capture 12; notify 0x38 follows).
+    pub fn save_block_as_favorite(&mut self, block: u64, index: u64, name: &str) -> Result<()> {
+        validate_name(name)?;
+        let params = int_map(&[
+            (key::BLOCK, Value::from(block)),
+            (key::FAVORITE_INDEX, Value::from(index)),
+            (key::FAVORITE_NEW, Value::from(true)),
+            (key::NAME, Value::from(format!("{name}\0"))),
+        ]);
+        self.session.request(self.editor, editor_cmd::SAVE_FAVORITE, params).map(drop)
     }
 
     /// Overwrite a preset slot with a preset file, sent byte for byte as HX Edit
