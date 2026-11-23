@@ -51,11 +51,8 @@ pub(crate) struct EditorState {
     paste_presets: Option<(Vec<usize>, usize)>,
     history: Vec<Vec<Block>>,
     redo: Vec<Vec<Block>>,
-    picker: Option<usize>,
     browser_search: String,
-    picker_search: String,
     browser_nav: BrowserNav,
-    picker_nav: BrowserNav,
     footswitch_window: bool,
 }
 
@@ -116,7 +113,6 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
 /// A gesture on the chain or the panel, handled after drawing.
 enum Act {
     Select(usize),
-    Pick(usize),
     Drop(Drag, usize),
     Toggle(usize),
     Param { position: usize, index: usize, value: Value, old: Value, began: bool },
@@ -193,9 +189,12 @@ impl App {
     /// Run edits of the edit buffer on the unit, then read it back for the screen.
     fn edit_job(&mut self, label: &str, f: impl FnOnce(&mut stomp::Stomp) -> hxs_core::Result<()> + Send + 'static) {
         self.mark_edited();
-        self.start_job(label, move |s| {
-            f(s)?;
-            Ok(JobResult::EditBuffer(s.edit_buffer()?))
+        self.start_job(label, move |s| match f(s) {
+            Ok(()) => Ok(JobResult::EditBuffer(s.edit_buffer()?)),
+            Err(e) => match s.edit_buffer() {
+                Ok(b) => Ok(JobResult::Rejected(b, e.to_string())),
+                Err(_) => Err(e),
+            },
         });
     }
 
@@ -326,9 +325,23 @@ impl App {
         };
         let search = self.ed.browser_search.to_lowercase();
         let nav = &mut self.ed.browser_nav;
+        let mut chosen = None;
         egui::ScrollArea::vertical().id_salt("browser").show(ui, |ui| {
-            model_browser(ui, c, style, &search, nav, "browser");
+            chosen = model_browser(ui, c, style, &search, nav);
         });
+        if let Some(drag) = chosen {
+            self.place(drag);
+        }
+    }
+
+    /// A model clicked in the list: it replaces the selected block, or fills the selected empty
+    /// position, exactly as if it were dropped there.
+    fn place(&mut self, drag: Drag) {
+        match (self.device.is_some(), self.ed.selected.filter(|p| chain::row_of(*p).is_some())) {
+            (false, _) => self.note("connect to the HX Stomp first".to_owned()),
+            (true, Some(p)) => self.drop_on(drag, p),
+            (true, None) => self.note("select a block or an empty position on the chain, then click a model".to_owned()),
+        }
     }
 
     pub(crate) fn editor_screen(&mut self, ui: &mut egui::Ui) {
@@ -539,7 +552,7 @@ impl App {
                         if selected || hovering_drop {
                             theme::glow(&painter, tile.shrink(3.0), 10.0, theme::SELECTED, 1.2);
                         }
-                        icons::miniature(&painter, tile, &category, base, b.enabled);
+                        icons::block(&painter, tile, &category, base, b.enabled);
                         let name: String = model_name(c, style, b.preset_id).chars().take(16).collect();
                         painter.text(pos2(tile.center().x, tile.bottom() + 4.0), Align2::CENTER_TOP, name, FontId::proportional(11.0), if b.enabled { theme::TEXT } else { theme::MUTED });
                         r.dnd_set_drag_payload(Drag::Block(position));
@@ -568,8 +581,8 @@ impl App {
                         if r.hovered() && dragging.is_none() {
                             painter.text(tile.center(), Align2::CENTER_CENTER, "+", FontId::proportional(22.0), theme::MUTED);
                         }
-                        if r.on_hover_text("Click to add a block, or drop one here").clicked() {
-                            acts.push(Act::Pick(position));
+                        if r.on_hover_text("Select it, then click a model in the list to add it here; or drop one here").clicked() {
+                            acts.push(Act::Select(position));
                         }
                     }
                 }
@@ -582,6 +595,9 @@ impl App {
             let split_k = d.routing.split.as_ref().map_or(1, |s| s.position);
             let join_k = d.routing.join.as_ref().map_or(9, |j| j.position);
             let nearest = |x: f32| BOUNDARIES.min_by(|a, b| (boundary_x(*a) - x).abs().total_cmp(&(boundary_x(*b) - x).abs())).unwrap_or(1);
+            let b_columns: Vec<u64> = d.blocks.iter().filter(|b| ROW_B.contains(&b.position)).filter_map(|b| chain::column_of(b.position)).map(|c| c as u64).collect();
+            let latest_split = b_columns.iter().min().map_or(1, |c| c + 1);
+            let earliest_join = b_columns.iter().max().map_or(9, |c| c + 2);
             let mut shown = [split_k, join_k];
             for (join, k, cell) in [(false, split_k, hxs_core::preset::CELL_SPLIT), (true, join_k, hxs_core::preset::CELL_JOIN)] {
                 let id = ui.id().with(("junction", join));
@@ -590,8 +606,11 @@ impl App {
                     (true, Some(p)) => Some(nearest(p.x)),
                     _ => None,
                 };
-                let valid = |to: u64| if join { to > split_k } else { to < join_k };
-                let at = target.filter(|t| valid(*t)).unwrap_or(k);
+                let (low, high) = match join {
+                    true => (earliest_join.max(split_k + 1).min(9), 9),
+                    false => (1, latest_split.min(join_k.saturating_sub(1)).max(1)),
+                };
+                let at = target.map_or(k, |t| t.clamp(low, high));
                 shown[usize::from(join)] = at;
                 if r.drag_stopped() && at != k {
                     acts.push(Act::MoveJunction(join, at));
@@ -640,7 +659,7 @@ impl App {
         }
         let Some(d) = self.device.as_mut() else { return acts };
         let Some(b) = d.blocks.iter_mut().find(|b| b.position == position) else {
-            ui.weak(format!("{} is empty: click it to add a block, or drop one there.", position_name(position)));
+            ui.weak(format!("{} is empty: click a model in the list on the left to add it here, or drop one here.", position_name(position)));
             return acts;
         };
         let model = catalog.and_then(|c| c.model(b.preset_id));
@@ -716,11 +735,6 @@ impl App {
                 self.ed.selected = Some(p);
                 self.ed.focus = Focus::Chain;
             }
-            Act::Pick(p) => {
-                self.ed.selected = Some(p);
-                self.ed.focus = Focus::Chain;
-                self.ed.picker = Some(p);
-            }
             Act::Drop(drag, to) => self.drop_on(drag, to),
             Act::Toggle(p) => {
                 self.push_history();
@@ -732,7 +746,13 @@ impl App {
                 self.mark_edited();
             }
             Act::BypassMidi(p, cc) => self.edit_job("assigning the virtual footswitch", move |s| s.assign_bypass_midi(p as u64, cc)),
-            Act::MoveJunction(join, to) => self.edit_job(if join { "moving the join" } else { "moving the split" }, move |s| s.move_junction(join, to)),
+            Act::MoveJunction(join, to) => {
+                let routing = self.device.as_mut().map(|d| &mut d.routing);
+                if let Some(j) = routing.and_then(|r| if join { r.join.as_mut() } else { r.split.as_mut() }) {
+                    j.position = to;
+                }
+                self.edit_job(if join { "moving the join" } else { "moving the split" }, move |s| s.move_junction(join, to));
+            }
             Act::Param { position, index, value, old, began } => {
                 if began && blocks.iter().any(|b| b.position == position) {
                     let mut before = blocks;
@@ -912,37 +932,9 @@ impl App {
     }
 
     pub(crate) fn editor_windows(&mut self, ctx: &egui::Context) {
-        self.picker_window(ctx);
         self.paste_presets_window(ctx);
         self.favorite_window(ctx);
         self.footswitch_window(ctx);
-    }
-
-    fn picker_window(&mut self, ctx: &egui::Context) {
-        let Some(position) = self.ed.picker else { return };
-        let mut open = true;
-        let mut chosen = None;
-        let style = self.style;
-        egui::Window::new(format!("Add a block at {}", position_name(position))).open(&mut open).default_size([320.0, 420.0]).collapsible(false).show(ctx, |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.ed.picker_search).hint_text("search"));
-            let Some(c) = self.catalog.as_ref().filter(|_| !self.catalog_ignored) else {
-                ui.weak("Load a catalog to pick models.");
-                return;
-            };
-            let search = self.ed.picker_search.to_lowercase();
-            let nav = &mut self.ed.picker_nav;
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                chosen = model_browser(ui, c, style, &search, nav, "picker");
-            });
-        });
-        match (open, chosen) {
-            (_, Some(drag)) => {
-                self.ed.picker = None;
-                self.drop_on(drag, position);
-            }
-            (false, None) => self.ed.picker = None,
-            (true, None) => {}
-        }
     }
 
     fn paste_presets_window(&mut self, ctx: &egui::Context) {
@@ -1062,7 +1054,7 @@ impl App {
 /// The model browser in levels: the categories, then a category's subtypes (its folders), then
 /// the models; a category with a single folder goes straight to its models. A search lists the
 /// matching models of every folder. Each model can be dragged; a click returns it.
-fn model_browser(ui: &mut egui::Ui, c: &Catalog, style: NameStyle, search: &str, nav: &mut BrowserNav, salt: &str) -> Option<Drag> {
+fn model_browser(ui: &mut egui::Ui, c: &Catalog, style: NameStyle, search: &str, nav: &mut BrowserNav) -> Option<Drag> {
     let mut clicked = None;
     let mut item_row = |ui: &mut egui::Ui, it: &catalog::FolderItem| {
         let Some(id) = it.model else { return };
@@ -1156,7 +1148,6 @@ fn model_browser(ui: &mut egui::Ui, c: &Catalog, style: NameStyle, search: &str,
             }
         }
     }
-    let _ = salt;
     clicked
 }
 

@@ -60,6 +60,8 @@ enum JobResult {
     Plan(PathBuf, Plan),
     Irs(Vec<IrSlot>),
     EditBuffer(Vec<u8>),
+    /// An edit the unit refused, with its edit buffer as it now stands.
+    Rejected(Vec<u8>, String),
     Favorites(Vec<FavoriteView>),
     Lists(Vec<IrSlot>, Vec<FavoriteView>),
     Presets(Vec<PresetEntry>),
@@ -410,6 +412,10 @@ impl App {
                     self.irs = irs;
                 }
                 Ok(JobResult::EditBuffer(b)) => self.load_edit_buffer(b),
+                Ok(JobResult::Rejected(b, e)) => {
+                    self.note(format!("{label} failed: {e}"));
+                    self.load_edit_buffer(b);
+                }
                 Ok(JobResult::Favorites(f)) => {
                     self.note(format!("{label}: {} favorites", f.len()));
                     self.favorites = f;
