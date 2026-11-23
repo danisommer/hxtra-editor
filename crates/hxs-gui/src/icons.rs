@@ -497,6 +497,31 @@ pub fn ui(painter: &Painter, r: Rect, name: &str, color: Color32) {
     }
 }
 
+/// The window buttons' glyphs (minimize, maximize, restore, close): thin and aligned to the
+/// pixel grid, centered in `r`.
+pub fn window(painter: &Painter, r: Rect, kind: &str, color: Color32) {
+    let s = Stroke::new(1.0_f32, color);
+    let c = pos2(r.center().x.round() + 0.5, r.center().y.round() + 0.5);
+    let h = 5.0;
+    match kind {
+        "minimize" => {
+            painter.line_segment([c + vec2(-h, 0.0), c + vec2(h, 0.0)], s);
+        }
+        "maximize" => {
+            painter.rect_stroke(Rect::from_center_size(c, vec2(2.0 * h, 2.0 * h)), 1.5, s);
+        }
+        "restore" => {
+            painter.rect_stroke(Rect::from_center_size(c + vec2(-1.0, 1.0), vec2(2.0 * h - 2.0, 2.0 * h - 2.0)), 1.5, s);
+            painter.line_segment([c + vec2(-h + 1.0, -h), c + vec2(h, -h)], s);
+            painter.line_segment([c + vec2(h, -h), c + vec2(h, h - 1.0)], s);
+        }
+        _ => {
+            painter.line_segment([c + vec2(-h, -h), c + vec2(h, h)], s);
+            painter.line_segment([c + vec2(-h, h), c + vec2(h, -h)], s);
+        }
+    }
+}
+
 /// The icons of the screen bar.
 pub fn screen(painter: &Painter, r: Rect, name: &str, color: Color32) {
     let pen = Pen::new(painter, r, 0.24, 0.085, 2.0);

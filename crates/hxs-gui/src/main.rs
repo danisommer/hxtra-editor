@@ -6,6 +6,7 @@ mod editor;
 mod icons;
 mod knob;
 mod theme;
+mod window;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -32,7 +33,7 @@ const TOOL: &str = concat!("hxtra-editor ", env!("CARGO_PKG_VERSION"));
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 840.0]).with_title("hxtra-editor"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 840.0]).with_min_inner_size([900.0, 560.0]).with_title("hxtra-editor").with_decorations(false),
         ..Default::default()
     };
     eframe::run_native(
@@ -929,7 +930,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
-        egui::TopBottomPanel::top("top").show(ctx, |ui| self.top_bar(ui));
+        egui::TopBottomPanel::top("top").exact_height(window::TITLE_HEIGHT).frame(egui::Frame::none().fill(theme::PANEL)).show(ctx, |ui| window::title_bar(ui, |ui| self.top_bar(ui)));
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(self.log.back().map_or("", String::as_str));
@@ -952,6 +953,7 @@ impl eframe::App for App {
         self.editor_windows(ctx);
         self.shortcuts(ctx);
         editor::paint_drag_ghost(ctx);
+        window::edges(ctx);
         ctx.request_repaint_after(Duration::from_millis(50));
     }
 
